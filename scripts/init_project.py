@@ -10,7 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from _common import SAMPLE_COLUMNS, WorkflowError, load_structured, write_json
+from _common import SAMPLE_COLUMNS, WorkflowError, git_commit, load_structured, write_json
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -160,7 +160,7 @@ def main() -> int:
     (output / "Report.md").write_text(bilingual_report(project_id), encoding="utf-8")
     write_json(output / ".workflow" / "template-lock.json", {
         "skill": "single-cell-multiomics-analysis", "skill_version": (SKILL_ROOT / "VERSION").read_text().strip(),
-        "schema_version": 1,
+        "skill_git_commit": git_commit(SKILL_ROOT), "schema_version": 1,
     })
     print(json.dumps({"project": str(output), "status": "initialized"}, indent=2))
     return 0

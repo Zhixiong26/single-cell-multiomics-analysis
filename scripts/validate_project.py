@@ -183,6 +183,17 @@ def validate(project: Path, require_paths: bool = True) -> dict:
         path = Path(row["rna_path"])
         stat = path.stat()
         rna_inventory.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    code_hashes = {}
+    code_suffixes = {".py", ".sh", ".sbatch", ".ipynb"}
+    for code_root in (files["root"] / "Scripts", files["root"] / "tools"):
+        if code_root.exists():
+            for path in sorted(item for item in code_root.rglob("*") if item.is_file() and item.suffix in code_suffixes):
+                code_hashes[str(path.relative_to(files["root"]))] = sha256_file(path)
+    workflow_entry = files["root"] / "workflow.py"
+    if workflow_entry.is_file():
+        code_hashes[str(workflow_entry.relative_to(files["root"]))] = sha256_file(workflow_entry)
+    code_signature = signature(code_hashes)
+    payload["code_signature"] = code_signature
     payload["input_signature"] = signature({
         "project": {key: value for key, value in cfg.items() if key not in {"project_root", "config_files"}},
         "samples": active,
@@ -190,6 +201,7 @@ def validate(project: Path, require_paths: bool = True) -> dict:
         "allc_inventory": allc_inventory,
         "allc_cell_ids": allc_cell_ids,
         "annotation_sha256": annotation_hash,
+        "code_signature": code_signature,
         "references": reference_hashes,
         "environments": env_results,
         "routes": route_capabilities,

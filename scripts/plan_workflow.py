@@ -96,11 +96,13 @@ def plan(project: Path, routes_option: str, run_id: str) -> dict:
     if run_dir.exists() and any(run_dir.iterdir()):
         raise WorkflowError("refusing existing non-empty run directory: %s" % run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    template_lock_path = root / ".workflow" / "template-lock.json"
+    template_lock = json.loads(template_lock_path.read_text(encoding="utf-8")) if template_lock_path.is_file() else None
     payload = {
         "schema_version": 1, "run_id": run_id, "project": str(root),
         "created_at": datetime.now(timezone.utc).isoformat(), "status": "planned",
         "routes": selected, "input_signature": preflight["input_signature"],
-        "git_commit": git_commit(root), "tasks": tasks,
+        "git_commit": git_commit(root), "template_lock": template_lock, "tasks": tasks,
     }
     write_json(run_dir / "preflight.json", preflight)
     write_json(run_dir / "plan.json", payload)

@@ -8,4 +8,6 @@ ALLC roots default to recursive `**/*.allc.tsv.gz`; ALLCools-style `*_allc.gz` i
 
 Generated interfaces are `config/project.yaml`, `samples.tsv`, `analysis.yaml`, `environments.tsv`, and `scheduler.yaml`. Relative data paths resolve against the generated project root. References may include `genome_id`, `chrom_sizes`, `blacklist`, optional `tss_bed`, and corresponding `_sha256` fields. The skill supplies no implicit genome or blacklist.
 
+The orchestrator Python must be 3.9 or newer. Stage-specific interpreters and executables are declared with absolute paths in `environments.tsv`; validation records their version output without modifying those environments.
+
 RNA enables Scanpy. ALLC enables VMR, ALLCools, and related MethylVI routes. Cell-type DMR and VMR+DMR require a readable annotation table. Missing modalities disable their routes rather than invalidating supported routes.
