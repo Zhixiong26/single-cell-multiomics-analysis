@@ -1,0 +1,3 @@
+node-a|cpu*|mixed|32|8/24/0/32|128000|70000|(null)
+node-b|fat|allocated|64|64/0/0/64|512000|12000|(null)
+node-c|cpu*|down|32|0/0/32/32|128000|120000|(null)

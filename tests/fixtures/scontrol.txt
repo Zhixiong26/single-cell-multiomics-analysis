@@ -1,0 +1,3 @@
+NodeName=node-a CPUAlloc=8 CPUTot=32 CPULoad=6.5 RealMemory=128000 AllocMem=40000 FreeMem=70000 State=MIXED Partitions=cpu
+NodeName=node-b CPUAlloc=64 CPUTot=64 CPULoad=41.2 RealMemory=512000 AllocMem=480000 FreeMem=12000 State=ALLOCATED Partitions=fat
+NodeName=node-c CPUAlloc=0 CPUTot=32 CPULoad=0 RealMemory=128000 AllocMem=0 FreeMem=120000 State=DOWN Partitions=cpu

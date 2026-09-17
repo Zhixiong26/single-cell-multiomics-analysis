@@ -1,0 +1,2 @@
+101|alice|RUNNING|cpu|node-a|8|40G|01:00|1-00:00:00
+102|bob|RUNNING|fat|node-b|64|480G|02:00|2-00:00:00
