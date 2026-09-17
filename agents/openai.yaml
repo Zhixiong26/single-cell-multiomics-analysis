@@ -1,0 +1,6 @@
+interface:
+  display_name: "Single-cell Multiomics Analysis"
+  short_description: "Portable RNA and methylome workflows"
+  default_prompt: "Use $single-cell-multiomics-analysis to configure, validate, schedule, and document a portable single-cell multiomics workflow."
+policy:
+  allow_implicit_invocation: true

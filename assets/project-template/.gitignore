@@ -1,0 +1,10 @@
+Data/
+Results/
+Scripts/logs/
+.workflow/runs/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Keep stable configuration and the template lock under version control.
+!.workflow/template-lock.json
