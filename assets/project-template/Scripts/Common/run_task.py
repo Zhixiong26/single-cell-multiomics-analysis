@@ -21,6 +21,38 @@ def render_command(command, variables):
     return [str(token).format(**variables) for token in tokens]
 
 
+def validate_outputs(item, variables):
+    rendered, missing = [], []
+    for value in item.get("outputs", []):
+        path = Path(str(value).format(**variables))
+        rendered.append(str(path))
+        if not path.exists():
+            missing.append(str(path))
+    if missing:
+        raise WorkflowError("declared task outputs are absent: %s" % ", ".join(missing))
+    return rendered
+
+
+def summarize_workflow(plan, run_dir):
+    summary_task = next(item for item in plan["tasks"] if item["id"] == "workflow_summary")
+    failures = []
+    for dependency in summary_task["dependencies"]:
+        task_dir = run_dir / "tasks" / dependency
+        marker = task_dir / "task.COMPLETE"
+        status_path = task_dir / "task_status.json"
+        if not marker.is_file() or not status_path.is_file():
+            failures.append("%s lacks completion evidence" % dependency)
+            continue
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        if status.get("status") != "complete" or status.get("input_signature") != plan.get("input_signature"):
+            failures.append("%s has invalid status or input signature" % dependency)
+    if failures:
+        raise WorkflowError("workflow summary failed: %s" % "; ".join(failures))
+    payload = {"status": "complete", "tasks": len(plan["tasks"]), "input_signature": plan["input_signature"]}
+    write_json(run_dir / "workflow_summary.json", payload)
+    return [str(run_dir / "workflow_summary.json")]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, required=True)
@@ -37,14 +69,13 @@ def main() -> int:
     cfg = load_project(root)
     commands = cfg["analysis"].get("task_commands") or {}
     command = commands.get(args.task)
-    if command is None and args.task == "workflow_summary":
-        command = ["/bin/true"]
-    if command is None:
+    internal_summary = args.task == "workflow_summary" and command is None
+    if command is None and not internal_summary:
         for prefix, value in commands.items():
             if prefix.endswith("*") and args.task.startswith(prefix[:-1]):
                 command = value
                 break
-    if command is None:
+    if command is None and not internal_summary:
         raise WorkflowError(
             "analysis.task_commands does not define %s; generate/adapt the task command before execution" % args.task
         )
@@ -53,21 +84,32 @@ def main() -> int:
     variables = {
         "project": str(root), "run_id": args.run_id, "run_dir": str(run_dir),
         "task": args.task, "task_dir": str(task_dir), "python": sys.executable,
+        "result_dir": plan.get("result_dir", str(root / "Results" / "runs" / args.run_id)),
     }
     variables.update({key: str(value) for key, value in item.get("parameters", {}).items()})
-    rendered = render_command(command, variables)
+    rendered = ["<internal:workflow_summary>"] if internal_summary else render_command(command, variables)
     state = {
         "task": args.task, "status": "running", "command": rendered,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "input_signature": plan["input_signature"],
+        "input_signature": plan["input_signature"], "code_signature": plan.get("code_signature"),
         "task_signature": signature({"command": rendered, "parameters": item.get("parameters", {})}),
         "allocated_cpus": os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SCMO_CPUS")),
         "allocated_memory_mb": os.environ.get("SLURM_MEM_PER_NODE", os.environ.get("SCMO_MEMORY_MB")),
     }
     write_json(task_dir / "task_status.json", state)
-    code = subprocess.call(rendered, cwd=str(root))
+    try:
+        if internal_summary:
+            outputs = summarize_workflow(plan, run_dir)
+            code = 0
+        else:
+            code = subprocess.call(rendered, cwd=str(root))
+            outputs = validate_outputs(item, variables) if code == 0 else []
+    except (OSError, ValueError, WorkflowError) as exc:
+        code, outputs = 1, []
+        state["error"] = str(exc)
     state["status"] = "complete" if code == 0 else "failed"
     state["return_code"] = code
+    state["outputs"] = outputs
     state["finished_at"] = datetime.now(timezone.utc).isoformat()
     write_json(task_dir / "task_status.json", state)
     if code == 0:

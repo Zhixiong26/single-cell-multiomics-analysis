@@ -22,6 +22,8 @@ import bootstrap_environments as environment_bootstrap  # noqa: E402
 from bootstrap_environments import bootstrap  # noqa: E402
 from init_project import main as unused_init_main  # noqa: F401,E402
 from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
+from inspect_run import inspect as inspect_run  # noqa: E402
+from plan_workflow import make_tasks  # noqa: E402
 from validate_project import validate  # noqa: E402
 
 
@@ -184,6 +186,42 @@ class SkillTests(unittest.TestCase):
             code = subprocess.call([sys.executable, str(ROOT / "scripts" / "inspect_run.py"), "--project", str(project), "--run-id", "unit"])
             self.assertEqual(code, 0)
             self.assertTrue((project / ".workflow/runs/unit/workflow.COMPLETE").is_file())
+            subprocess.check_call([sys.executable, str(ROOT / "scripts" / "submit_workflow.py"), "--project", str(project), "--run-id", "unit"])
+            resumed = json.loads((project / ".workflow/runs/unit/submissions.json").read_text())
+            self.assertTrue(all(item.get("resumed") for item in resumed))
+
+    def test_inspect_never_completes_a_partial_plan_or_marker_only_task(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            run_dir = project / ".workflow/runs/partial"
+            run_dir.mkdir(parents=True)
+            tasks = [{"id": "task_%d" % index, "parameters": {}} for index in range(10)]
+            (run_dir / "plan.json").write_text(json.dumps({
+                "input_signature": "input", "code_signature": "code", "tasks": tasks,
+            }))
+            (run_dir / "submissions.json").write_text(json.dumps([{
+                "task": "task_0", "job_id": "local_task_0", "status": "complete",
+            }]))
+            marker_dir = run_dir / "tasks/task_0"
+            marker_dir.mkdir(parents=True)
+            (marker_dir / "task.COMPLETE").touch()
+            result = inspect_run(project, "partial")
+            self.assertNotEqual(result["status"], "complete")
+            self.assertEqual(len(result["tasks"]), 10)
+            self.assertFalse((run_dir / "workflow.COMPLETE").exists())
+
+    def test_explicit_downstream_routes_have_closed_dependencies(self):
+        analysis = {"methscan": {"vmr_thresholds": [0.02]}, "methylvi": {"feature_targets": [10000]}}
+        routes = {
+            "scanpy": False, "methscan_vmr": False, "methscan_dmr": False,
+            "allcools": False, "methylvi_allcools": True,
+            "methylvi_vmr": False, "methylvi_vmr_dmr": False,
+        }
+        tasks = make_tasks(routes, analysis)
+        identifiers = {item["id"] for item in tasks}
+        self.assertIn("allcools_features", identifiers)
+        self.assertIn("methylvi_allcools_10000", identifiers)
+        self.assertTrue(all(set(item["dependencies"]).issubset(identifiers) for item in tasks))
 
     def test_slurm_reserved_and_observed_memory_are_distinct(self):
         fixtures = ROOT / "tests" / "fixtures"

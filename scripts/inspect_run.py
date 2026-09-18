@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import WorkflowError, write_json
+from _common import WorkflowError, signature, write_json
 
 
 TERMINAL_OK = {"COMPLETED", "complete"}
@@ -54,20 +54,48 @@ def inspect(project: Path, run_id: str) -> dict:
     submissions = json.loads(submissions_path.read_text(encoding="utf-8")) if submissions_path.is_file() else []
     usage = sacct_usage([str(item.get("job_id", "")) for item in submissions])
     write_json(run_dir / "resource_usage" / "sacct.json", usage)
+    submission_by_task = {item["task"]: item for item in submissions}
     task_rows = []
-    for item in submissions:
-        job_id = str(item.get("job_id", ""))
-        state = usage.get(job_id, {}).get("state", item.get("status", "unknown"))
-        marker = run_dir / "tasks" / item["task"] / "task.COMPLETE"
-        if marker.is_file():
-            state = "complete"
+    for planned in plan.get("tasks", []):
+        item = submission_by_task.get(planned["id"])
+        job_id = str(item.get("job_id", "")) if item else ""
+        scheduler_state = usage.get(job_id, {}).get(
+            "state", item.get("status", "unknown") if item else "not_submitted"
+        )
+        task_dir = run_dir / "tasks" / planned["id"]
+        marker = task_dir / "task.COMPLETE"
+        status_path = task_dir / "task_status.json"
+        evidence_valid, reason = False, None
+        if marker.is_file() and status_path.is_file():
+            try:
+                status_record = json.loads(status_path.read_text(encoding="utf-8"))
+                expected_signature = signature({
+                    "command": status_record.get("command", []),
+                    "parameters": planned.get("parameters", {}),
+                })
+                evidence_valid = (
+                    status_record.get("status") == "complete"
+                    and status_record.get("return_code") == 0
+                    and status_record.get("input_signature") == plan.get("input_signature")
+                    and status_record.get("code_signature") == plan.get("code_signature")
+                    and status_record.get("task_signature") == expected_signature
+                    and all(Path(value).exists() for value in status_record.get("outputs", []))
+                )
+                if not evidence_valid:
+                    reason = "completion evidence or signature mismatch"
+            except (OSError, ValueError, TypeError):
+                reason = "invalid task_status.json"
+        elif marker.is_file() or status_path.is_file():
+            reason = "incomplete marker/status evidence"
+        state = "complete" if evidence_valid else scheduler_state
         task_rows.append({
-            "task": item["task"], "job_id": job_id, "state": state,
-            "complete_marker": marker.is_file(), "resource_usage": usage.get(job_id),
+            "task": planned["id"], "job_id": job_id, "state": state,
+            "complete_marker": marker.is_file(), "evidence_valid": evidence_valid,
+            "evidence_error": reason, "resource_usage": usage.get(job_id),
         })
     if any(row["state"] in TERMINAL_BAD for row in task_rows):
         status = "failed"
-    elif task_rows and all(row["state"] in TERMINAL_OK for row in task_rows):
+    elif task_rows and all(row["evidence_valid"] for row in task_rows):
         status = "complete"
     elif submissions:
         status = "in_progress"
@@ -81,6 +109,10 @@ def inspect(project: Path, run_id: str) -> dict:
     write_json(run_dir / "run_summary.json", result)
     if status == "complete":
         (run_dir / "workflow.COMPLETE").touch()
+    else:
+        marker = run_dir / "workflow.COMPLETE"
+        if marker.exists():
+            marker.unlink()
     return result
 
 

@@ -25,23 +25,44 @@ def load_plan(project: Path, run_id: str) -> tuple[Path, dict]:
     return run_dir, json.loads(path.read_text(encoding="utf-8"))
 
 
-def environment_python(project: Path) -> str:
+def environment_python(project: Path, stage: str = "orchestrator") -> str:
     path = Path(project).resolve() / "config" / "environments.tsv"
     import csv
     with path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
+    preferred = [stage]
+    if stage == "orchestrator":
+        preferred.append("common")
+    for wanted in preferred:
+        for row in rows:
+            if row["stage"] == wanted and row["python"].strip():
+                return row["python"].strip()
     for row in rows:
         if row["stage"] in {"orchestrator", "common"} and row["python"].strip():
             return row["python"].strip()
-    return sys.executable
+    raise WorkflowError("no Python interpreter is configured for stage %s" % stage)
 
 
-def task_command(project: Path, run_id: str, task_id: str) -> list[str]:
+def task_command(project: Path, run_id: str, item: dict) -> list[str]:
     root = Path(project).resolve()
     return [
-        environment_python(root), str(root / "Scripts" / "Common" / "run_task.py"),
-        "--project", str(root), "--run-id", run_id, "--task", task_id,
+        environment_python(root, item.get("environment", "orchestrator")),
+        str(root / "Scripts" / "Common" / "run_task.py"),
+        "--project", str(root), "--run-id", run_id, "--task", item["id"],
     ]
+
+
+def completed_evidence(run_dir: Path, task_id: str, input_signature: str) -> bool:
+    task_dir = run_dir / "tasks" / task_id
+    marker, status_path = task_dir / "task.COMPLETE", task_dir / "task_status.json"
+    if not marker.is_file() or not status_path.is_file():
+        return False
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (status.get("status") == "complete" and status.get("return_code") == 0
+            and status.get("input_signature") == input_signature)
 
 
 def task_is_implemented(task_id: str, commands: dict) -> bool:
@@ -73,19 +94,35 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
     if backend == "slurm" and not wrapper.is_file():
         raise WorkflowError("Slurm wrapper is absent: %s" % wrapper)
 
-    job_ids = {}
-    submissions = []
+    submissions_path = run_dir / "submissions.json"
+    previous = json.loads(submissions_path.read_text(encoding="utf-8")) if submissions_path.is_file() else []
+    records = {item["task"]: item for item in previous}
+    job_ids = {
+        task_id: str(record["job_id"]) for task_id, record in records.items()
+        if record.get("status") in {"submitted", "running"} and record.get("job_id")
+    }
     max_parallel = max(1, int(scheduler.get("max_parallel", 2)))
     limited_profiles = set(scheduler.get("limited_profiles") or ["methscan_branch", "dmr", "feature_builder", "trainer"])
     throttle_slots = [None] * max_parallel
     throttle_index = 0
     for item in plan["tasks"]:
         task_id = item["id"]
+        if completed_evidence(run_dir, task_id, plan["input_signature"]):
+            records[task_id] = dict(records.get(task_id, {}), task=task_id, status="complete", resumed=True)
+            write_json(submissions_path, [records[x["id"]] for x in plan["tasks"] if x["id"] in records])
+            continue
+        existing = records.get(task_id)
+        if existing and existing.get("status") in {"submitted", "running"} and existing.get("job_id"):
+            continue
         snapshot_path = run_dir / "resource_snapshots" / (task_id + ".json")
         snapshot = inspect(root, item["profile"])
         write_json(snapshot_path, snapshot)
         recommendation = snapshot["recommendation"]
-        command = task_command(root, run_id, task_id)
+        command = task_command(root, run_id, item)
+        unresolved = [name for name in item["dependencies"]
+                      if name not in job_ids and not completed_evidence(run_dir, name, plan["input_signature"])]
+        if unresolved:
+            raise WorkflowError("task %s has unresolved dependencies: %s" % (task_id, ", ".join(unresolved)))
         dependencies = [job_ids[name] for name in item["dependencies"] if name in job_ids]
         throttle_dependencies = []
         slot = None
@@ -114,8 +151,8 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
             if code:
                 record["status"] = "failed"
                 record["return_code"] = code
-                submissions.append(record)
-                write_json(run_dir / "submissions.json", submissions)
+                records[task_id] = record
+                write_json(submissions_path, [records[x["id"]] for x in plan["tasks"] if x["id"] in records])
                 raise WorkflowError("local task failed: %s" % task_id)
             record["status"] = "complete"
             record["job_id"] = "local_%s" % task_id
@@ -148,8 +185,8 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
                 throttle_slots[slot] = job_id
         else:
             raise WorkflowError("unsupported backend: %s" % backend)
-        submissions.append(record)
-        write_json(run_dir / "submissions.json", submissions)
+        records[task_id] = record
+        write_json(submissions_path, [records[x["id"]] for x in plan["tasks"] if x["id"] in records])
     plan["status"] = "dry_run" if dry_run else ("submitted" if backend == "slurm" else "complete")
     plan["job_ids"] = job_ids
     write_json(run_dir / "plan.json", plan)
