@@ -1,0 +1,20 @@
+name: scmo-analysis-core
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.9
+  - pip
+  - pyyaml
+  - scanpy=1.9.3
+  - anndata=0.9.2
+  - leidenalg=0.10.2
+  - python-igraph
+  - samtools
+  - htslib
+  - pysam
+  - pip:
+      - ALLCools==1.1.1
+      - harmonypy==0.0.10
+      - scrublet==0.2.3

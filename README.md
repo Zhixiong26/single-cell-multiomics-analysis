@@ -45,13 +45,12 @@ ln -s "$HOME/single-cell-multiomics-analysis" \
 
 - orchestrator Python 3.9 或更高版本；
 - 对输入数据和参考文件具有只读权限；
-- RNA 路线具有可用的 Scanpy/Harmony 环境；
-- 甲基化路线具有对应的 MethSCAn、ALLCools 或 MethylVI 环境；
+- 系统中具有 `conda` 或 `mamba`；已有兼容分析环境可以复用，没有时由 Skill 创建；
 - Slurm 模式下可以运行 `sinfo`、`scontrol`、`squeue`、`sbatch` 和 `sacct`；
 - genome manifest 显式提供 `chrom_sizes`、blacklist 和可选 TSS BED，推荐同时提供 SHA-256；
 - DMR 路线需要非空、唯一的 `cell_id` 和有效的 `cell_type`，且至少两个细胞类型达到配置的最小细胞数。
 
-Skill 不创建或修改 Conda 环境，只验证用户声明的绝对路径和版本命令。
+Skill 会先只读发现兼容环境。缺失的 Scanpy/ALLCools、MethSCAn 或 MethylVI 环境会在项目 `.environments/` 下隔离创建、验证并写入 `config/environments.tsv`；不会升级或修改已经存在的共享环境。
 
 ### 4. 准备 intake 文件
 
@@ -104,6 +103,12 @@ environments:
     version_command: /envs/allcools/bin/python --version
     required: 1
 
+  - stage: scanpy_allcools
+    python: /envs/allcools/bin/python
+    executable: /envs/allcools/bin/python
+    version_command: /envs/allcools/bin/python --version
+    required: 1
+
   - stage: methscan
     python: /envs/methscan/bin/python
     executable: /envs/methscan/bin/methscan
@@ -142,25 +147,40 @@ analysis:
 
 `top_per_cell_type` 只用于 Top-N hypo-DMR 热图。VMR+DMR MethylVI 路线使用满足阈值的全部 unique pooled-DMR，两者不会混用。详细字段见 [configuration.md](references/configuration.md)。
 
-### 5. 生成和校验项目
+如果使用者没有现成环境，可以省略 `environments` 或保留待创建的目标路径，后续 bootstrap 会自动补齐。
+
+### 5. 生成项目并配置环境
 
 输出目录必须不存在或为空：
 
 ```bash
 SKILL_ROOT="$HOME/single-cell-multiomics-analysis"
-PYTHON=/envs/allcools/bin/python
+PYTHON=/path/to/python-3.9-or-newer
 PROJECT=/work/example_multiome
 
 "$PYTHON" "$SKILL_ROOT/scripts/init_project.py" \
   --intake intake.yaml \
   --output "$PROJECT"
 
+# 先只读生成环境复用/创建计划
+"$PYTHON" "$PROJECT/tools/bootstrap_environments.py" \
+  --project "$PROJECT"
+
+# 自动创建缺失的隔离环境并更新 environments.tsv
+"$PYTHON" "$PROJECT/tools/bootstrap_environments.py" \
+  --project "$PROJECT" \
+  --execute
+
+# 环境完成后执行完整校验
+
 "$PYTHON" "$PROJECT/tools/validate_project.py" \
   --project "$PROJECT" \
   --json-out "$PROJECT/preflight.json"
 ```
 
-校验内容包括配置 schema、文件和 `.tbi`、ALLC 列和 CG context、`mc <= cov`、cell ID、cell type、参考文件 checksum、环境版本和路线依赖。校验不会修改输入文件。
+bootstrap 优先复用通过导入测试的已有环境；缺失 profile 默认创建到 `PROJECT/.environments/`。计划和执行证据保存在 `.workflow/environment-bootstrap/`。如需使用其他可写位置，可传入 `--prefix-root`。
+
+校验内容包括配置 schema、文件和 `.tbi`、ALLC 列和 CG context、`mc <= cov`、cell ID、cell type、参考文件 checksum、环境版本和路线依赖。校验不会修改输入数据或共享环境。
 
 ### 6. 规划 DAG 和 dry-run
 
@@ -235,11 +255,12 @@ PROJECT/.workflow/runs/<run_id>/
   "$HOME/single-cell-multiomics-analysis"
 ```
 
-仓库测试覆盖 RNA-only、ALLC-only、配对多组学、重复 cell ID、错误 checksum、缺失环境、Slurm 节点状态、资源不足和 local fallback。
+仓库测试覆盖 RNA-only、ALLC-only、配对多组学、环境 bootstrap 计划、重复 cell ID、错误 checksum、缺失环境、Slurm 节点状态、资源不足和 local fallback。
 
 ### 10. 进一步文档
 
 - [配置与 intake](references/configuration.md)
+- [环境发现与自动配置](references/environments.md)
 - [Scanpy 路线](references/scanpy.md)
 - [MethSCAn 路线](references/methscan.md)
 - [ALLCools 和 MethylVI 路线](references/methylvi.md)
@@ -287,6 +308,10 @@ PROJECT=/work/example_multiome
   --intake intake.yaml \
   --output "$PROJECT"
 
+"$PYTHON" "$PROJECT/tools/bootstrap_environments.py" \
+  --project "$PROJECT" \
+  --execute
+
 "$PYTHON" "$PROJECT/tools/validate_project.py" \
   --project "$PROJECT" \
   --json-out "$PROJECT/preflight.json"
@@ -301,6 +326,8 @@ PROJECT=/work/example_multiome
   --run-id run_001 \
   --dry-run
 ```
+
+The bootstrapper reuses compatible environments read-only and creates missing profiles under `PROJECT/.environments/` from bundled versioned specs. It verifies imports or executables before updating `config/environments.tsv`; it never upgrades a discovered shared environment.
 
 Review the preflight report, DAG, task commands, and resource plans. Scanpy has a default execution adapter. MethSCAn, ALLCools, and MethylVI production tasks require commands adapted to the declared inputs and environments in `config/analysis.yaml`; submission is blocked before the first `sbatch` if any planned command is missing.
 

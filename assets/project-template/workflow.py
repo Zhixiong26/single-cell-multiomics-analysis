@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 TOOLS = {
-    "validate": "validate_project.py", "plan": "plan_workflow.py",
+    "bootstrap": "bootstrap_environments.py", "validate": "validate_project.py", "plan": "plan_workflow.py",
     "resources": "inspect_resources.py", "submit": "submit_workflow.py",
     "inspect": "inspect_run.py", "report": "update_report.py",
 }

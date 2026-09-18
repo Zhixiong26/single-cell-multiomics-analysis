@@ -7,3 +7,5 @@
 - Annotation guard failed: review current markers and clusters; do not reuse old numeric mappings.
 - Fractional counts, `mc > cov`, duplicates, or manifest mismatch are hard failures.
 - Submitted Slurm jobs are snapshots; later script edits do not alter them.
+- Missing environment stage: run `tools/bootstrap_environments.py --project PROJECT` to inspect the plan, then add `--execute`. Do not repair it by upgrading a shared environment.
+- Failed Conda creation: inspect `.workflow/environment-bootstrap/` and the incomplete isolated prefix. The bootstrapper intentionally does not delete it; choose a new empty prefix after correcting channel, network, or storage problems.

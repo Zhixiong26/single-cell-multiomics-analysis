@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from _common import WorkflowError, load_project  # noqa: E402
+import bootstrap_environments as environment_bootstrap  # noqa: E402
+from bootstrap_environments import bootstrap  # noqa: E402
 from init_project import main as unused_init_main  # noqa: F401,E402
 from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
 from validate_project import validate  # noqa: E402
@@ -63,9 +66,9 @@ class SkillTests(unittest.TestCase):
             "samples": [sample],
             "annotation": {"path": str(annotation), "cell_id_column": "cell_id", "cell_type_column": "cell_type"},
             "environments": [{
-                "stage": "orchestrator", "python": sys.executable,
+                "stage": stage, "python": sys.executable,
                 "executable": sys.executable, "version_command": sys.executable + " --version", "required": 1,
-            }],
+            } for stage in ("orchestrator", "scanpy_allcools", "methscan", "methylvi")],
             "analysis": {"task_commands": {"scanpy": ["/bin/true"]}},
             "scheduler": {"backend": "local", "local": {"max_threads": 64, "max_memory": "256G"}},
         }
@@ -129,6 +132,49 @@ class SkillTests(unittest.TestCase):
             result = validate(project)
             self.assertEqual(result["status"], "invalid")
             self.assertIn("required executable is absent", " ".join(result["errors"]))
+
+    def test_environment_bootstrap_plans_isolated_prefixes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "allc")
+            self.assertTrue((project / "tools/bootstrap_environments.py").is_file())
+            self.assertTrue((project / "environment-specs/analysis-core.yaml").is_file())
+            environments = project / "config" / "environments.tsv"
+            environments.write_text(
+                "stage\tpython\texecutable\tversion_command\trequired\n",
+                encoding="utf-8",
+            )
+            result = bootstrap(project, execute=False, discover=False)
+            self.assertEqual(result["status"], "planned")
+            self.assertEqual(result["required_profiles"], ["analysis_core", "methscan", "methylvi"])
+            self.assertTrue(all(item["action"] == "create" for item in result["actions"]))
+            self.assertTrue(all("/.environments/" in item["prefix"] for item in result["actions"]))
+
+    def test_environment_bootstrap_execute_updates_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "allc")
+            environments = project / "config" / "environments.tsv"
+            environments.write_text(
+                "stage\tpython\texecutable\tversion_command\trequired\n",
+                encoding="utf-8",
+            )
+
+            def verified(prefix, profile, timeout=180):
+                return {
+                    "profile": profile, "prefix": str(prefix), "valid": True,
+                    "version": profile + " test", "command": [str(prefix / "bin/python")],
+                }
+
+            with mock.patch.object(environment_bootstrap, "find_manager", return_value="/bin/true"), \
+                    mock.patch.object(environment_bootstrap, "check_prefix", side_effect=verified), \
+                    mock.patch.object(environment_bootstrap.subprocess, "check_call") as create:
+                result = bootstrap(project, execute=True, discover=False)
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(create.call_count, 3)
+            rows = environments.read_text(encoding="utf-8")
+            for stage in ("orchestrator", "scanpy_allcools", "methscan", "methylvi"):
+                self.assertIn(stage, rows)
+            self.assertTrue((project / ".workflow/environment-bootstrap/result.json").is_file())
+            self.assertTrue((project / "Scripts/Environment/Report.md").is_file())
 
     def test_plan_dry_run_and_local_completion(self):
         with tempfile.TemporaryDirectory() as temp:

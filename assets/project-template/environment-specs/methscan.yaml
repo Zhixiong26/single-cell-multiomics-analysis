@@ -1,0 +1,9 @@
+name: scmo-methscan
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.8
+  - pip
+  - pip:
+      - MethSCAn==1.1.0

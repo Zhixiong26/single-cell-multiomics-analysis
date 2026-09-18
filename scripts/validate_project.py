@@ -122,10 +122,18 @@ def validate(project: Path, require_paths: bool = True) -> dict:
             errors.append("annotation cell IDs and cell types must be non-empty")
 
     env_results = []
-    for env in load_environments(project):
+    environment_rows = load_environments(project)
+    for env in environment_rows:
         required = env["required"].strip().lower() in {"1", "true", "yes"}
         executable = resolve_path(files["root"], env["executable"])
-        item = {"stage": env["stage"], "required": required, "executable": str(executable) if executable else ""}
+        python = resolve_path(files["root"], env["python"])
+        item = {
+            "stage": env["stage"], "required": required,
+            "python": str(python) if python else "",
+            "executable": str(executable) if executable else "",
+        }
+        if required and require_paths and (python is None or not python.is_file()):
+            errors.append("required Python is absent for %s: %s" % (env["stage"], python))
         if required and require_paths and (executable is None or not executable.is_file()):
             errors.append("required executable is absent for %s: %s" % (env["stage"], executable))
             item["status"] = "missing"
@@ -138,6 +146,17 @@ def validate(project: Path, require_paths: bool = True) -> dict:
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append("version check failed for %s: %s" % (env["stage"], exc))
         env_results.append(item)
+
+    declared_stages = {row["stage"].strip() for row in environment_rows}
+    required_stages = {"orchestrator", "scanpy_allcools"}
+    if allc_samples:
+        required_stages.update({"methscan", "methylvi"})
+    missing_stages = sorted(required_stages - declared_stages)
+    if missing_stages:
+        errors.append(
+            "required environment stages are absent: %s; run tools/bootstrap_environments.py --project PROJECT --execute"
+            % ", ".join(missing_stages)
+        )
 
     minimum = int(cfg.get("analysis", {}).get("methscan", {}).get("min_cells", 6))
     annotated_types = {}
@@ -189,6 +208,10 @@ def validate(project: Path, require_paths: bool = True) -> dict:
         if code_root.exists():
             for path in sorted(item for item in code_root.rglob("*") if item.is_file() and item.suffix in code_suffixes):
                 code_hashes[str(path.relative_to(files["root"]))] = sha256_file(path)
+    spec_root = files["root"] / "environment-specs"
+    if spec_root.exists():
+        for path in sorted(item for item in spec_root.rglob("*.yaml") if item.is_file()):
+            code_hashes[str(path.relative_to(files["root"]))] = sha256_file(path)
     workflow_entry = files["root"] / "workflow.py"
     if workflow_entry.is_file():
         code_hashes[str(workflow_entry.relative_to(files["root"]))] = sha256_file(workflow_entry)

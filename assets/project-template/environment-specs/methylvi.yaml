@@ -1,0 +1,13 @@
+name: scmo-methylvi
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - scvi-tools=1.5.0.post1
+  - pytorch=2.13.0
+  - scanpy=1.12.3
+  - mudata=0.4.1
+  - leidenalg
+  - python-igraph
+  - umap-learn
