@@ -14,4 +14,6 @@ The orchestrator Python must be 3.9 or newer. Stage-specific interpreters and ex
 
 `scheduler.profiles` defines floor/target/ceiling resources for every task profile. `limited_profiles` selects memory-intensive profiles constrained by `max_parallel`; `validation_workers` controls full ALLC validation. Scanpy defaults explicitly include HVG flavor, batch key, and Scrublet expected doublet rate in generated `analysis.yaml`.
 
-RNA enables Scanpy. ALLC enables VMR, ALLCools, and unsupervised MethylVI; the workflow generates `Unassigned` metadata when annotation is absent. Cell-type DMR and VMR+DMR require approved annotation. Missing modalities disable only unsupported routes.
+`analysis.methscan.vmr_thresholds` must be a non-empty list of unique numeric values in `(0, 1]`. `analysis.methylvi.feature_targets` must be a non-empty list of unique positive integers. Invalid empty lists are rejected during preflight rather than failing inside DAG construction.
+
+RNA enables Scanpy. ALLC enables VMR, ALLCools, and unsupervised MethylVI; the workflow generates `Unassigned` metadata when annotation is absent. Cell-type DMR and VMR+DMR require approved annotation. Missing modalities disable only unsupported routes. Explicit route subsets validate only the input modalities, references, and environments used by the resulting closed DAG; `auto` validates all automatically selected routes.

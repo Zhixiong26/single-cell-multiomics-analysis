@@ -22,6 +22,16 @@ SAMPLE_COLUMNS = (
 )
 LEGACY_SAMPLE_COLUMNS = SAMPLE_COLUMNS[:9]
 RNA_FORMATS = {"", "10x_mtx", "10x_zip", "10x_h5"}
+BUILTIN_TASKS = {
+    "scanpy", "methscan_select_convert", "methscan_prepare", "methscan_filter",
+    "methscan_smooth", "methscan_pairwise_dmr", "methscan_hypo_heatmaps",
+    "methscan_pooled_dmr", "allcools_features", "pooled_dmr_prepare",
+    "pooled_dmr_counts", "workflow_summary",
+}
+BUILTIN_TASK_PREFIXES = (
+    "methscan_vmr_", "methylvi_allcools_", "methylvi_vmr_features_",
+    "methylvi_vmr_dmr_", "methylvi_vmr_",
+)
 
 
 class WorkflowError(RuntimeError):
@@ -66,6 +76,45 @@ def sha256_file(path: Path) -> str:
 def signature(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def task_override(commands: Dict[str, Any], task_id: str) -> Any:
+    if task_id in commands:
+        return commands[task_id]
+    for pattern, command in commands.items():
+        if pattern.endswith("*") and task_id.startswith(pattern[:-1]):
+            return command
+    return None
+
+
+def task_is_implemented(task_id: str, commands: Dict[str, Any]) -> bool:
+    return (task_override(commands, task_id) is not None
+            or task_id in BUILTIN_TASKS
+            or any(task_id.startswith(prefix) for prefix in BUILTIN_TASK_PREFIXES))
+
+
+def validate_recorded_outputs(values: Iterable[Any], allow_empty: bool = False) -> tuple[bool, str | None]:
+    outputs = [Path(str(value)) for value in values]
+    if not outputs and not allow_empty:
+        return False, "task declares no output evidence"
+    for path in outputs:
+        if not path.exists():
+            return False, "declared task output is absent: %s" % path
+        if path.name == "task_outputs.json":
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                artifacts = payload.get("artifacts", [])
+            except (OSError, ValueError, TypeError, AttributeError):
+                return False, "task_outputs.json is not a valid JSON object: %s" % path
+            if not isinstance(artifacts, list) or not artifacts:
+                return False, "task_outputs.json must contain a non-empty artifacts list: %s" % path
+            relative = [str(artifact) for artifact in artifacts if not Path(str(artifact)).is_absolute()]
+            if relative:
+                return False, "recorded artifact paths must be absolute: %s" % ", ".join(relative)
+            missing = [str(artifact) for artifact in artifacts if not Path(str(artifact)).exists()]
+            if missing:
+                return False, "recorded artifacts are absent: %s" % ", ".join(missing)
+    return True, None
 
 
 def resolve_path(root: Path, value: Any) -> Optional[Path]:

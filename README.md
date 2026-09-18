@@ -214,9 +214,17 @@ quick 模式逐文件检查索引、格式和有界记录；full 模式并行流
   --dry-run
 ```
 
-`plan_workflow.py` 只生成 DAG，不提交作业。`--routes auto` 根据输入启用可运行路线，也可以显式传入逗号分隔的路线名。
+`plan_workflow.py` 只生成 DAG，不提交作业。`--routes auto` 根据输入启用可运行路线，也可以显式传入逗号分隔的路线名。显式选择子路线时，只校验该 DAG 实际使用的输入模态、参考文件和环境；例如 `--routes scanpy` 不扫描 ALLC，也不要求 MethSCAn/MethylVI 环境或甲基化参考文件。ALLCools 自动补齐到 MethSCAn filter 的基础链，但不会因此额外运行 smooth/VMR。
 
-Scanpy、MethSCAn、ALLCools 和 MethylVI 均有内置执行适配器，并自动使用 `environments.tsv` 中对应阶段的 Python。`analysis.task_commands` 仅用于专家覆盖；覆盖命令仍必须产生声明的输出证据。
+Scanpy、MethSCAn、ALLCools 和 MethylVI 均有内置执行适配器，并自动使用 `environments.tsv` 中对应阶段的 Python。`analysis.task_commands` 仅用于专家覆盖；覆盖命令成功后必须写出计划声明的 `<task_dir>/task_outputs.json`：
+
+```json
+{
+  "artifacts": ["/absolute/path/to/result"]
+}
+```
+
+`artifacts` 必须是非空列表，且每个路径都必须存在。任务状态会分别保存子进程退出码和证据校验后的包装任务退出码。
 
 ### 7. 正式提交
 
@@ -348,7 +356,7 @@ PROJECT=/work/example_multiome
 
 The bootstrapper reuses compatible environments read-only and creates missing profiles under `PROJECT/.environments/` from bundled versioned specs. It verifies imports or executables before updating `config/environments.tsv`; it never upgrades a discovered shared environment.
 
-Review the preflight report, DAG, and resource plans. Built-in adapters cover Scanpy, MethSCAn, ALLCools, and MethylVI and select the declared stage environment. `analysis.task_commands` is an expert override, not a required setup step.
+Review the preflight report, DAG, and resource plans. Built-in adapters cover Scanpy, MethSCAn, ALLCools, and MethylVI and select the declared stage environment. Explicit route subsets validate only the input modalities, references, and environments used by their closed DAG. `analysis.task_commands` is an expert override, not a required setup step. A successful override must create `<task_dir>/task_outputs.json` with a non-empty `artifacts` array of existing absolute paths; child-process and wrapper-task return codes are recorded separately.
 
 To execute an approved run, repeat `submit_workflow.py` without `--dry-run`. Production submission requires matching full-validation evidence and creates it when absent. Each Slurm task receives a fresh resource query immediately before submission. Local execution uses the same DAG under configured limits. Results are isolated under `Results/runs/<run_id>/`, and re-submission resumes incomplete work.
 

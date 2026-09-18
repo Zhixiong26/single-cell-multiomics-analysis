@@ -21,7 +21,10 @@ status_file="$output_dir/common_status.tsv"
 printf 'stage\tstatus\ttimestamp\n' > "$status_file"
 {
   printf 'key\tvalue\n'
-  printf 'allc_source\t%s\n' "$allc_source"
+  printf 'samples_tsv\t%s\n' "$SCMO_SAMPLES_TSV"
+  printf 'samples_tsv_sha256\t%s\n' "$(sha256sum "$SCMO_SAMPLES_TSV" | awk '{print $1}')"
+  printf 'sample_ids\t%s\n' "$sample_ids"
+  printf 'allc_sources_json\t%s\n' "$allc_sources"
   printf 'rna_annotation_table\t%s\n' "$rna_annotation_table"
   printf 'scan_var_thresholds\t%s\n' "${scan_var_thresholds[*]}"
   printf 'methdiff_scope\tper_sample\n'

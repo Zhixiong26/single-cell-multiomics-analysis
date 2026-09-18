@@ -83,7 +83,9 @@ def allc_cell_id(path: Path, row: dict) -> str:
     return value if not prefix or value.startswith(prefix + "_") else prefix + "_" + value
 
 
-def validate(project: Path, require_paths: bool = True, mode: str = "quick", workers: int = 1) -> dict:
+def validate(project: Path, require_paths: bool = True, mode: str = "quick", workers: int = 1,
+             required_stages: set[str] | None = None,
+             selected_routes: set[str] | None = None) -> dict:
     if mode not in {"quick", "full"}:
         raise WorkflowError("validation mode must be quick or full")
     files = project_files(project)
@@ -93,10 +95,42 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     errors, warnings = [], []
     if int(cfg.get("schema_version", 1)) == 1:
         warnings.append("schema v1 is deprecated; migrate the project configuration to schema v2")
-    rna_samples = [row for row in active if row["rna_path"]]
-    allc_samples = [row for row in active if row["allc_root"]]
+    all_rna_samples = [row for row in active if row["rna_path"]]
+    all_allc_samples = [row for row in active if row["allc_root"]]
+    use_rna = selected_routes is None or "scanpy" in selected_routes
+    use_allc = selected_routes is None or bool(selected_routes - {"scanpy"})
+    rna_samples = all_rna_samples if use_rna else []
+    allc_samples = all_allc_samples if use_allc else []
     allc_inventory, allc_cell_ids, validation_jobs = [], [], []
     context = str(cfg.get("analysis", {}).get("allcools", {}).get("mc_context", "CGN"))
+    thresholds = cfg.get("analysis", {}).get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
+    needs_thresholds = selected_routes is None or bool(selected_routes & {
+        "methscan_vmr", "methscan_dmr", "methylvi_vmr", "methylvi_vmr_dmr",
+    })
+    if needs_thresholds and (not isinstance(thresholds, list) or not thresholds):
+        errors.append("analysis.methscan.vmr_thresholds must be a non-empty list")
+    elif needs_thresholds:
+        try:
+            numeric_thresholds = [float(value) for value in thresholds]
+            if any(value <= 0 or value > 1 for value in numeric_thresholds):
+                errors.append("analysis.methscan.vmr_thresholds values must satisfy 0 < value <= 1")
+            if len(set(numeric_thresholds)) != len(numeric_thresholds):
+                errors.append("analysis.methscan.vmr_thresholds values must be unique")
+        except (TypeError, ValueError):
+            errors.append("analysis.methscan.vmr_thresholds values must be numeric")
+    feature_targets = cfg.get("analysis", {}).get("methylvi", {}).get("feature_targets", [10000, 30000])
+    needs_features = selected_routes is None or bool(selected_routes & {
+        "allcools", "methylvi_allcools", "methylvi_vmr", "methylvi_vmr_dmr",
+    })
+    if needs_features and (not isinstance(feature_targets, list) or not feature_targets):
+        errors.append("analysis.methylvi.feature_targets must be a non-empty list")
+    elif needs_features:
+        valid_targets = all(isinstance(value, int) and not isinstance(value, bool) and value > 0
+                            for value in feature_targets)
+        if not valid_targets:
+            errors.append("analysis.methylvi.feature_targets values must be positive integers")
+        elif len(set(feature_targets)) != len(feature_targets):
+            errors.append("analysis.methylvi.feature_targets values must be unique")
     for row in allc_samples:
         root = Path(row["allc_root"])
         pattern = row["allc_glob"].strip() or "**/*.allc.tsv.gz"
@@ -174,11 +208,17 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
 
     env_results = []
     environment_rows = load_environments(project)
+    if required_stages is None:
+        required_stages = {"orchestrator", "scanpy_allcools"}
+        if allc_samples:
+            required_stages.update({"methscan", "methylvi"})
     for env in environment_rows:
-        required = env["required"].strip().lower() in {"1", "true", "yes"}
+        declared_required = env["required"].strip().lower() in {"1", "true", "yes"}
+        required = env["stage"].strip() in required_stages
         executable = resolve_path(files["root"], env["executable"])
         python = resolve_path(files["root"], env["python"])
-        item = {"stage": env["stage"], "required": required, "python": str(python) if python else "",
+        item = {"stage": env["stage"], "required": required, "declared_required": declared_required,
+                "python": str(python) if python else "",
                 "executable": str(executable) if executable else ""}
         if required and require_paths and (python is None or not python.is_file()):
             errors.append("required Python is absent for %s: %s" % (env["stage"], python))
@@ -187,7 +227,7 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
             item["status"] = "missing"
         else:
             item["status"] = "present" if executable and executable.exists() else "optional_absent"
-        if env["version_command"].strip() and item["status"] == "present":
+        if required and env["version_command"].strip() and item["status"] == "present":
             try:
                 output = subprocess.check_output(shlex.split(env["version_command"]), stderr=subprocess.STDOUT, timeout=30)
                 item["version"] = output.decode("utf-8", "replace").strip().splitlines()[0]
@@ -195,9 +235,6 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
                 errors.append("version check failed for %s: %s" % (env["stage"], exc))
         env_results.append(item)
     declared_stages = {row["stage"].strip() for row in environment_rows}
-    required_stages = {"orchestrator", "scanpy_allcools"}
-    if allc_samples:
-        required_stages.update({"methscan", "methylvi"})
     missing_stages = sorted(required_stages - declared_stages)
     if missing_stages:
         errors.append("required environment stages are absent: %s; run tools/bootstrap_environments.py --project PROJECT --execute" % ", ".join(missing_stages))
@@ -235,9 +272,9 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     if allc_samples and annotation_available and not dmr_ready:
         warnings.append("cell-type DMR routes require approved annotation, no placeholder labels, and at least two cell types with >= %d matching cells" % minimum)
     routes = {
-        "scanpy": bool(rna_samples), "methscan_vmr": bool(allc_samples), "methscan_dmr": dmr_ready,
-        "allcools": bool(allc_samples), "methylvi_allcools": bool(allc_samples),
-        "methylvi_vmr": bool(allc_samples), "methylvi_vmr_dmr": dmr_ready,
+        "scanpy": bool(all_rna_samples), "methscan_vmr": bool(all_allc_samples), "methscan_dmr": dmr_ready,
+        "allcools": bool(all_allc_samples), "methylvi_allcools": bool(all_allc_samples),
+        "methylvi_vmr": bool(all_allc_samples), "methylvi_vmr_dmr": dmr_ready,
     }
     if allc_samples and not annotation_available:
         warnings.append("cell-type DMR routes are disabled until an annotation table is provided")
@@ -247,7 +284,7 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
         path = Path(row["rna_path"])
         stat = path.stat()
         rna_inventory.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
-    code_hashes, code_suffixes = {}, {".py", ".sh", ".sbatch", ".ipynb"}
+    code_hashes, code_suffixes = {}, {".py", ".sh", ".sbatch"}
     for code_root in (files["root"] / "Scripts", files["root"] / "tools"):
         if code_root.exists():
             for path in sorted(item for item in code_root.rglob("*") if item.is_file() and item.suffix in code_suffixes):
@@ -263,6 +300,7 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     payload = {
         "status": "invalid" if errors else "valid", "schema_version": 2,
         "project": str(files["root"]), "validation_mode": mode,
+        "selected_routes": sorted(selected_routes) if selected_routes is not None else None,
         "counts": {"samples": len(active), "rna_samples": len(rna_samples),
                    "allc_samples": len(allc_samples), "allc_cells": len(allc_inventory)},
         "routes": routes, "references": reference_hashes, "environments": env_results,

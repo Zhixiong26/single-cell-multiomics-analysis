@@ -71,10 +71,13 @@ def main() -> int:
             raise WorkflowError("environment executable is absent for %s" % stage)
         return str(resolve_path(root, value))
 
+    task = args.task
     scanpy_python = python_for("scanpy_allcools")
-    methscan_python = python_for("methscan") if args.task != "scanpy" else scanpy_python
-    methylvi_python = python_for("methylvi") if args.task != "scanpy" else scanpy_python
-    methscan_exe = executable_for("methscan") if args.task != "scanpy" else scanpy_python
+    methscan_python = python_for("methscan") if task.startswith("methscan_") else scanpy_python
+    methscan_exe = executable_for("methscan") if task.startswith("methscan_") else scanpy_python
+    needs_methylvi = (task == "allcools_features" or task.startswith("methylvi_")
+                       or task in {"pooled_dmr_prepare", "pooled_dmr_counts"})
+    methylvi_python = python_for("methylvi") if needs_methylvi else scanpy_python
     allcools_prefix = str(Path(scanpy_python).resolve().parent.parent)
     methylvi_prefix = str(Path(methylvi_python).resolve().parent.parent)
     meth_root = result / "methscan"
@@ -92,7 +95,10 @@ def main() -> int:
         "SCMO_BLACKLIST": str(blacklist), "SCMO_METHSCAN_EXE": methscan_exe,
         "SCMO_METHSCAN_PYTHON": methscan_python, "SCMO_SCANPY_PYTHON": scanpy_python,
         "SCMO_ALLCOOLS_ENV": allcools_prefix, "SCMO_METHYLVI_ENV": methylvi_prefix,
-        "SCMO_ALLC_SOURCE": next((row["allc_root"] for row in __import__("_common").load_samples(root) if row["include"] and row["allc_root"]), str(root)),
+        "SCMO_ALLC_SOURCES": json.dumps([
+            {"sample_id": row["sample_id"], "allc_root": row["allc_root"], "allc_glob": row["allc_glob"]}
+            for row in __import__("_common").load_samples(root) if row["include"] and row["allc_root"]
+        ], sort_keys=True),
         "SCMO_SAMPLE_IDS": " ".join(row["sample_id"] for row in __import__("_common").load_samples(root) if row["include"] and row["allc_root"]),
         "SCMO_ANNOTATION_APPROVED": "1" if annotation.get("review_status") == "approved" else "0",
         "SCMO_MIN_SITES": str(meth.get("min_sites", 300000)),
@@ -139,7 +145,6 @@ def main() -> int:
         write_json(args.task_dir / "task_outputs.json", {"task": args.task, "artifacts": resolved})
 
     scripts = root / "Scripts"
-    task = args.task
     parameters = item.get("parameters", {})
     if task == "scanpy":
         out = result / "scanpy"

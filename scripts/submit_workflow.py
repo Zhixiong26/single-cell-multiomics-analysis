@@ -12,7 +12,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import WorkflowError, load_project, write_json
+from _common import (WorkflowError, load_project, task_is_implemented,
+                     validate_recorded_outputs, write_json)
 from inspect_resources import inspect
 from validate_project import validate
 
@@ -61,27 +62,9 @@ def completed_evidence(run_dir: Path, task_id: str, input_signature: str) -> boo
         status = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    outputs_valid = True
-    for value in status.get("outputs", []):
-        path = Path(value)
-        if not path.exists():
-            outputs_valid = False
-            break
-        if path.name == "task_outputs.json":
-            try:
-                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
-            except (OSError, ValueError, TypeError):
-                outputs_valid = False
-                break
-            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
-                outputs_valid = False
-                break
+    outputs_valid, _ = validate_recorded_outputs(status.get("outputs", []))
     return (status.get("status") == "complete" and status.get("return_code") == 0
             and status.get("input_signature") == input_signature and outputs_valid)
-
-
-def task_is_implemented(task_id: str, commands: dict) -> bool:
-    return True
 
 
 def slurm_job_state(job_id: str) -> str:
@@ -112,7 +95,10 @@ def slurm_job_state(job_id: str) -> str:
 def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
     root = Path(project).resolve()
     run_dir, plan = load_plan(root, run_id)
-    current = validate(root)
+    required_stages = {stage for item in plan.get("tasks", [])
+                       for stage in item.get("required_environments", [item.get("environment", "orchestrator")])}
+    selected_routes = {name for name, enabled in plan.get("routes", {}).items() if enabled}
+    current = validate(root, required_stages=required_stages, selected_routes=selected_routes)
     if current["status"] != "valid":
         raise WorkflowError("pre-submit preflight failed: %s" % "; ".join(current["errors"]))
     if current["input_signature"] != plan["input_signature"]:
@@ -134,7 +120,8 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
             except (OSError, ValueError):
                 pass
         if full is None:
-            full = validate(root, mode="full", workers=max(1, int(scheduler.get("validation_workers", 4))))
+            full = validate(root, mode="full", workers=max(1, int(scheduler.get("validation_workers", 4))),
+                            required_stages=required_stages, selected_routes=selected_routes)
             write_json(validation_path, full)
         if full["status"] != "valid" or full["input_signature"] != current["input_signature"]:
             raise WorkflowError("matching full input validation is required before production submission")

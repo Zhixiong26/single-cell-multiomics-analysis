@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from _common import WorkflowError, load_project, signature, write_json  # noqa: E402
+from _common import (WorkflowError, load_project, signature, task_override,
+                     validate_recorded_outputs, write_json)  # noqa: E402
 
 
 def render_command(command, variables):
@@ -22,30 +23,14 @@ def render_command(command, variables):
 
 
 def validate_outputs(item, variables):
-    rendered, missing = [], []
+    rendered = []
     for value in item.get("outputs", []):
         path = Path(str(value).format(**variables))
         rendered.append(str(path))
-        if not path.exists():
-            missing.append(str(path))
-    if missing:
-        raise WorkflowError("declared task outputs are absent: %s" % ", ".join(missing))
+    valid, reason = validate_recorded_outputs(rendered)
+    if not valid:
+        raise WorkflowError(reason or "declared task output evidence is invalid")
     return rendered
-
-
-def recorded_outputs_exist(values):
-    for value in values:
-        path = Path(value)
-        if not path.exists():
-            return False
-        if path.name == "task_outputs.json":
-            try:
-                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
-            except (OSError, ValueError, TypeError):
-                return False
-            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
-                return False
-    return True
 
 
 def summarize_workflow(plan, run_dir):
@@ -62,11 +47,13 @@ def summarize_workflow(plan, run_dir):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         expected_signature = signature({"command": status.get("command", []),
                                         "parameters": dependency_plan.get("parameters", {})})
+        outputs_valid, output_reason = validate_recorded_outputs(status.get("outputs", []))
         if (status.get("status") != "complete" or status.get("input_signature") != plan.get("input_signature")
                 or status.get("code_signature") != plan.get("code_signature")
                 or status.get("task_signature") != expected_signature
-                or not recorded_outputs_exist(status.get("outputs", []))):
-            failures.append("%s has invalid status or input signature" % dependency)
+                or not outputs_valid):
+            failures.append("%s has invalid status/signature/output evidence: %s" %
+                            (dependency, output_reason or "signature mismatch"))
     if failures:
         raise WorkflowError("workflow summary failed: %s" % "; ".join(failures))
     payload = {"status": "complete", "tasks": len(plan["tasks"]), "input_signature": plan["input_signature"]}
@@ -89,13 +76,8 @@ def main() -> int:
     item = matches[0]
     cfg = load_project(root)
     commands = cfg["analysis"].get("task_commands") or {}
-    command = commands.get(args.task)
+    command = task_override(commands, args.task)
     internal_summary = args.task == "workflow_summary" and command is None
-    if command is None and not internal_summary:
-        for prefix, value in commands.items():
-            if prefix.endswith("*") and args.task.startswith(prefix[:-1]):
-                command = value
-                break
     if command is None and not internal_summary:
         command = [sys.executable, str(root / "Scripts" / "Common" / "task_adapter.py"),
                    "--project", str(root), "--run-id", args.run_id, "--task", args.task,
@@ -123,10 +105,13 @@ def main() -> int:
             outputs = summarize_workflow(plan, run_dir)
             code = 0
         else:
-            code = subprocess.call(rendered, cwd=str(root))
-            outputs = validate_outputs(item, variables) if code == 0 else []
+            process_code = subprocess.call(rendered, cwd=str(root))
+            state["process_return_code"] = process_code
+            code = process_code
+            outputs = validate_outputs(item, variables) if process_code == 0 else []
     except (OSError, ValueError, WorkflowError) as exc:
         code, outputs = 1, []
+        state["failure_stage"] = "output_validation" if state.get("process_return_code") == 0 else "execution"
         state["error"] = str(exc)
     state["status"] = "complete" if code == 0 else "failed"
     state["return_code"] = code

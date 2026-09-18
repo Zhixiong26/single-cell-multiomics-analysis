@@ -7,3 +7,5 @@ Require unique cells/features, integral nonnegative counts, `mc <= cov`, explici
 VMRs and ALLC manifests must share a completed MethSCAn signature. VMR+DMR retains selected VMRs and appends only merged pooled DMRs with zero genomic overlap.
 
 Export latent embedding, ordinary UMAP/Leiden, supervised sensitivity views, methylation QC, summaries, and completion markers under the run-specific result root. Ordinary UMAP remains the primary latent-structure view.
+
+ALLCools reuses the common MethSCAn selection/prepare/filter chain because its expected-cell authority and COV inputs come from the filtered manifest. It does not require smooth or VMR scan unless a VMR route is also selected. MethylVI work is submitted only through the run DAG; no independent stage-local `sbatch` entry point is supported.

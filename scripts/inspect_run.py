@@ -10,26 +10,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import WorkflowError, signature, write_json
+from _common import WorkflowError, signature, validate_recorded_outputs, write_json
 
 
 TERMINAL_OK = {"COMPLETED", "complete"}
-TERMINAL_BAD = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "failed"}
-
-
-def recorded_outputs_exist(values: list[str]) -> bool:
-    for value in values:
-        path = Path(value)
-        if not path.exists():
-            return False
-        if path.name == "task_outputs.json":
-            try:
-                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
-            except (OSError, ValueError, TypeError):
-                return False
-            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
-                return False
-    return True
+TERMINAL_BAD = {
+    "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
+    "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT", "failed",
+}
 
 
 def sacct_usage(job_ids: list[str]) -> dict[str, dict]:
@@ -88,16 +76,17 @@ def inspect(project: Path, run_id: str) -> dict:
                     "command": status_record.get("command", []),
                     "parameters": planned.get("parameters", {}),
                 })
+                outputs_valid, output_reason = validate_recorded_outputs(status_record.get("outputs", []))
                 evidence_valid = (
                     status_record.get("status") == "complete"
                     and status_record.get("return_code") == 0
                     and status_record.get("input_signature") == plan.get("input_signature")
                     and status_record.get("code_signature") == plan.get("code_signature")
                     and status_record.get("task_signature") == expected_signature
-                    and recorded_outputs_exist(status_record.get("outputs", []))
+                    and outputs_valid
                 )
                 if not evidence_valid:
-                    reason = "completion evidence or signature mismatch"
+                    reason = output_reason or "completion evidence or signature mismatch"
             except (OSError, ValueError, TypeError):
                 reason = "invalid task_status.json"
         elif marker.is_file() or status_path.is_file():

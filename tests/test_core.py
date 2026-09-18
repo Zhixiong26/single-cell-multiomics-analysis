@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import gzip
+import itertools
 import json
 import shutil
 import subprocess
@@ -17,12 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from _common import WorkflowError, load_project  # noqa: E402
+from _common import (WorkflowError, load_project, task_is_implemented,
+                     validate_recorded_outputs)  # noqa: E402
 import bootstrap_environments as environment_bootstrap  # noqa: E402
 from bootstrap_environments import bootstrap  # noqa: E402
 from init_project import main as unused_init_main  # noqa: F401,E402
 from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
-from inspect_run import inspect as inspect_run  # noqa: E402
+from inspect_run import TERMINAL_BAD, inspect as inspect_run  # noqa: E402
 from plan_workflow import make_tasks  # noqa: E402
 from submit_workflow import slurm_job_state  # noqa: E402
 from validate_project import allc_cell_id, validate, validate_allc_record  # noqa: E402
@@ -272,6 +274,138 @@ class SkillTests(unittest.TestCase):
             known = {item["id"] for item in planned}
             self.assertTrue(known)
             self.assertTrue(all(set(item["dependencies"]).issubset(known) for item in planned))
+            by_id = {item["id"]: item for item in planned}
+            if "allcools_features" in by_id:
+                self.assertIn("methscan_filter", by_id)
+                self.assertEqual(by_id["allcools_features"]["dependencies"], ["methscan_filter"])
+                if route == "allcools":
+                    self.assertNotIn("methscan_smooth", by_id)
+                    self.assertFalse(any(name.startswith("methscan_vmr_") for name in by_id))
+        names = list(routes)
+        for size in range(1, len(names) + 1):
+            for selected_names in itertools.combinations(names, size):
+                selected = {name: name in selected_names for name in names}
+                planned = make_tasks(selected, analysis)
+                by_id = {item["id"]: item for item in planned}
+                self.assertTrue(all(task_is_implemented(item["id"], {}) for item in planned))
+                if "allcools_features" in by_id:
+                    self.assertIn("methscan_filter", by_id)
+                    self.assertIn("methscan_filter", by_id["allcools_features"]["dependencies"])
+
+    def test_scanpy_subset_does_not_require_unused_methylation_environments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            environments = project / "config/environments.tsv"
+            lines = environments.read_text(encoding="utf-8").splitlines()
+            kept = [lines[0]] + [line for line in lines[1:]
+                                 if line.split("\t", 1)[0] in {"orchestrator", "scanpy_allcools"}]
+            environments.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            project_cfg_path = project / "config/project.yaml"
+            project_cfg = json.loads(project_cfg_path.read_text())
+            project_cfg["references"] = {}
+            project_cfg_path.write_text(json.dumps(project_cfg))
+            for index in (Path(temp) / "input/allc").glob("*.tbi"):
+                index.unlink()
+            subprocess.check_call([
+                sys.executable, str(ROOT / "scripts/plan_workflow.py"), "--project", str(project),
+                "--routes", "scanpy", "--run-id", "scanpy-only",
+            ])
+            plan = json.loads((project / ".workflow/runs/scanpy-only/plan.json").read_text())
+            self.assertEqual([item["id"] for item in plan["tasks"]], ["scanpy", "workflow_summary"])
+
+    def test_methscan_vmr_subset_does_not_require_methylvi_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "allc")
+            environments = project / "config/environments.tsv"
+            lines = environments.read_text(encoding="utf-8").splitlines()
+            environments.write_text("\n".join(
+                [lines[0]] + [line for line in lines[1:] if line.split("\t", 1)[0] != "methylvi"]
+            ) + "\n", encoding="utf-8")
+            subprocess.check_call([
+                sys.executable, str(ROOT / "scripts/plan_workflow.py"), "--project", str(project),
+                "--routes", "methscan_vmr", "--run-id", "vmr-only",
+            ])
+            plan = json.loads((project / ".workflow/runs/vmr-only/plan.json").read_text())
+            self.assertIn("methscan_filter", {item["id"] for item in plan["tasks"]})
+            required = {stage for item in plan["tasks"] for stage in item["required_environments"]}
+            self.assertNotIn("methylvi", required)
+
+    def test_invalid_empty_feature_lists_are_configuration_errors(self):
+        with self.assertRaisesRegex(WorkflowError, "vmr_thresholds must be a non-empty list"):
+            make_tasks({"methylvi_vmr_dmr": True}, {
+                "methscan": {"vmr_thresholds": []}, "methylvi": {"feature_targets": [10000]},
+            })
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            analysis_path = project / "config/analysis.yaml"
+            analysis = json.loads(analysis_path.read_text())
+            analysis["analysis"]["methscan"]["vmr_thresholds"] = []
+            analysis["analysis"]["methylvi"]["feature_targets"] = []
+            analysis_path.write_text(json.dumps(analysis))
+            result = validate(project)
+            self.assertEqual(result["status"], "invalid")
+            self.assertIn("vmr_thresholds must be a non-empty list", " ".join(result["errors"]))
+            self.assertIn("feature_targets must be a non-empty list", " ".join(result["errors"]))
+
+    def test_task_registry_and_output_evidence_fail_closed(self):
+        self.assertTrue(task_is_implemented("methylvi_vmr_0.02_10000", {}))
+        self.assertTrue(task_is_implemented("future_task", {"future_*": ["/bin/true"]}))
+        self.assertFalse(task_is_implemented("future_task", {}))
+        self.assertFalse(validate_recorded_outputs([])[0])
+        with tempfile.TemporaryDirectory() as temp:
+            evidence = Path(temp) / "task_outputs.json"
+            evidence.write_text('{"artifacts": []}\n')
+            self.assertFalse(validate_recorded_outputs([evidence])[0])
+            evidence.write_text('{"artifacts": ["relative.txt"]}\n')
+            self.assertFalse(validate_recorded_outputs([evidence])[0])
+
+    def test_interactive_notebook_is_outside_execution_signature(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            before = validate(project)
+            notebook = project / "Scripts/Scanpy/Notebooks/scanpy_workflow.ipynb"
+            payload = json.loads(notebook.read_text())
+            payload["metadata"]["review_note"] = "does not affect executable workflow"
+            notebook.write_text(json.dumps(payload))
+            after = validate(project)
+            self.assertEqual(before["code_signature"], after["code_signature"])
+            self.assertEqual(before["input_signature"], after["input_signature"])
+
+    def test_override_records_child_exit_code_before_evidence_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            analysis_path = project / "config/analysis.yaml"
+            analysis = json.loads(analysis_path.read_text())
+            analysis["analysis"]["task_commands"] = {
+                "scanpy": ["/bin/sh", "-c", "echo override-succeeded"],
+            }
+            analysis_path.write_text(json.dumps(analysis))
+            subprocess.check_call([
+                sys.executable, str(ROOT / "scripts/plan_workflow.py"), "--project", str(project),
+                "--routes", "scanpy", "--run-id", "override",
+            ])
+            code = subprocess.call([
+                sys.executable, str(project / "Scripts/Common/run_task.py"), "--project", str(project),
+                "--run-id", "override", "--task", "scanpy",
+            ])
+            self.assertEqual(code, 1)
+            status = json.loads((project / ".workflow/runs/override/tasks/scanpy/task_status.json").read_text())
+            self.assertEqual(status["process_return_code"], 0)
+            self.assertEqual(status["return_code"], 1)
+            self.assertEqual(status["failure_stage"], "output_validation")
+
+    def test_template_copy_excludes_caches_and_orphan_methylvi_sbatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            self.assertFalse(any(path.name == "__pycache__" for path in project.rglob("__pycache__")))
+            self.assertFalse(any(project.rglob("*.pyc")))
+            self.assertFalse((project / "Config").exists())
+        methylvi = ROOT / "assets/project-template/Scripts/Methylvi"
+        self.assertEqual(list(methylvi.glob("**/slurm/*.sbatch")), [])
+
+    def test_terminal_slurm_failures_are_not_reported_in_progress(self):
+        for state in ("BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT"):
+            self.assertIn(state, TERMINAL_BAD)
 
     def test_context_and_nonhuman_contigs_are_configuration_driven(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -10,18 +10,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from _common import WorkflowError, git_commit, load_project, write_json
+from _common import WorkflowError, git_commit, load_project, task_is_implemented, write_json
 from validate_project import validate
 
 
 def task(name: str, profile: str, dependencies: List[str] | None = None,
          parameters: Dict[str, Any] | None = None, environment: str = "orchestrator",
-         outputs: List[str] | None = None) -> dict:
+         outputs: List[str] | None = None, required_environments: List[str] | None = None) -> dict:
     if outputs is None and name != "workflow_summary":
         outputs = ["{task_dir}/task_outputs.json"]
     return {
         "id": name, "profile": profile, "dependencies": dependencies or [],
         "parameters": parameters or {}, "environment": environment,
+        "required_environments": required_environments or [environment],
         "outputs": outputs or [],
     }
 
@@ -77,34 +78,51 @@ def validate_dag(tasks: List[dict]) -> None:
 
 def make_tasks(routes: Dict[str, bool], analysis: Dict[str, Any]) -> List[dict]:
     routes = close_routes(routes)
+    thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
+    feature_targets = analysis.get("methylvi", {}).get("feature_targets", [10000, 30000])
+    if any(routes.get(name) for name in ("methscan_vmr", "methscan_dmr", "methylvi_vmr", "methylvi_vmr_dmr")):
+        if not isinstance(thresholds, list) or not thresholds:
+            raise WorkflowError("analysis.methscan.vmr_thresholds must be a non-empty list")
+    if any(routes.get(name) for name in ("allcools", "methylvi_allcools", "methylvi_vmr", "methylvi_vmr_dmr")):
+        if not isinstance(feature_targets, list) or not feature_targets:
+            raise WorkflowError("analysis.methylvi.feature_targets must be a non-empty list")
     tasks: List[dict] = []
     if routes.get("scanpy"):
         tasks.append(task("scanpy", "scanpy", environment="scanpy_allcools"))
+    needs_filter = bool(routes.get("methscan_vmr") or routes.get("allcools"))
     methscan_tail = None
-    if routes.get("methscan_vmr"):
+    if needs_filter:
         tasks.extend([
-            task("methscan_select_convert", "io_builder", environment="methscan"),
-            task("methscan_prepare", "serial", ["methscan_select_convert"], environment="methscan"),
-            task("methscan_filter", "serial", ["methscan_prepare"], environment="methscan"),
-            task("methscan_smooth", "serial", ["methscan_filter"], environment="methscan"),
+            task("methscan_select_convert", "io_builder", environment="methscan",
+                 required_environments=["methscan", "scanpy_allcools"]),
+            task("methscan_prepare", "serial", ["methscan_select_convert"], environment="methscan",
+                 required_environments=["methscan", "scanpy_allcools"]),
+            task("methscan_filter", "serial", ["methscan_prepare"], environment="methscan",
+                 required_environments=["methscan", "scanpy_allcools"]),
         ])
+    if routes.get("methscan_vmr"):
+        tasks.append(task("methscan_smooth", "serial", ["methscan_filter"], environment="methscan",
+                          required_environments=["methscan", "scanpy_allcools"]))
         methscan_tail = "methscan_smooth"
-        thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
         for threshold in thresholds:
-            tasks.append(task("methscan_vmr_%s" % threshold, "methscan_branch", [methscan_tail], {"threshold": threshold}, "methscan"))
+            tasks.append(task("methscan_vmr_%s" % threshold, "methscan_branch", [methscan_tail],
+                              {"threshold": threshold}, "methscan",
+                              required_environments=["methscan", "scanpy_allcools"]))
     if routes.get("methscan_dmr") and methscan_tail:
-        tasks.append(task("methscan_pairwise_dmr", "dmr", [methscan_tail], environment="methscan"))
-        tasks.append(task("methscan_hypo_heatmaps", "plot", ["methscan_pairwise_dmr"], environment="methscan"))
-        tasks.append(task("methscan_pooled_dmr", "dmr", [methscan_tail], environment="methscan"))
+        tasks.append(task("methscan_pairwise_dmr", "dmr", [methscan_tail], environment="methscan",
+                          required_environments=["methscan", "scanpy_allcools"]))
+        tasks.append(task("methscan_hypo_heatmaps", "plot", ["methscan_pairwise_dmr"], environment="methscan",
+                          required_environments=["methscan", "scanpy_allcools"]))
+        tasks.append(task("methscan_pooled_dmr", "dmr", [methscan_tail], environment="methscan",
+                          required_environments=["methscan", "scanpy_allcools"]))
     if routes.get("allcools"):
-        deps = ["methscan_filter"] if methscan_tail else []
-        tasks.append(task("allcools_features", "feature_builder", deps, environment="scanpy_allcools"))
-    feature_targets = analysis.get("methylvi", {}).get("feature_targets", [10000, 30000])
+        tasks.append(task("allcools_features", "feature_builder", ["methscan_filter"],
+                          environment="scanpy_allcools",
+                          required_environments=["scanpy_allcools", "methylvi"]))
     if routes.get("methylvi_allcools"):
         for count in feature_targets:
             tasks.append(task("methylvi_allcools_%s" % count, "trainer", ["allcools_features"], {"features": count}, "methylvi"))
     if routes.get("methylvi_vmr") and methscan_tail:
-        thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
         for threshold in thresholds:
             vmr_task = "methscan_vmr_%s" % threshold
             feature_task = "methylvi_vmr_features_%s" % threshold
@@ -113,10 +131,9 @@ def make_tasks(routes: Dict[str, bool], analysis: Dict[str, Any]) -> List[dict]:
                 tasks.append(task("methylvi_vmr_%s_%s" % (threshold, count), "trainer", [feature_task], {"threshold": threshold, "features": count}, "methylvi"))
     if routes.get("methylvi_vmr_dmr") and methscan_tail:
         tasks.append(task("pooled_dmr_prepare", "dmr_prepare", ["methscan_pooled_dmr"], environment="methylvi"))
-        first_threshold = analysis.get("methscan", {}).get("vmr_thresholds", [0.01])[0]
+        first_threshold = thresholds[0]
         tasks.append(task("pooled_dmr_counts", "feature_builder", ["pooled_dmr_prepare", "methylvi_vmr_features_%s" % first_threshold], environment="methylvi"))
         previous = "pooled_dmr_counts"
-        thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
         for threshold in thresholds:
             for count in feature_targets:
                 name = "methylvi_vmr_dmr_%s_%s" % (threshold, count)
@@ -132,31 +149,49 @@ def make_tasks(routes: Dict[str, bool], analysis: Dict[str, Any]) -> List[dict]:
     return tasks
 
 
+def required_environment_stages(tasks: List[dict]) -> set[str]:
+    return {stage for item in tasks for stage in item.get("required_environments", [item["environment"]])}
+
+
 def plan(project: Path, routes_option: str, run_id: str) -> dict:
     if not run_id.strip() or "/" in run_id or run_id in {".", ".."}:
         raise WorkflowError("run-id must be a non-empty path-safe name")
-    preflight = validate(project)
-    if preflight["status"] != "valid":
-        raise WorkflowError("preflight failed: %s" % "; ".join(preflight["errors"]))
-    available = preflight["routes"]
+    cfg = load_project(project)
     if routes_option == "auto":
+        preflight = validate(project)
+        if preflight["status"] != "valid":
+            raise WorkflowError("preflight failed: %s" % "; ".join(preflight["errors"]))
+        available = preflight["routes"]
         selected = dict(available)
     else:
         requested = {item.strip() for item in routes_option.split(",") if item.strip()}
-        unknown = requested - set(available)
-        blocked = {name for name in requested if not available.get(name)}
+        unknown = requested - {"scanpy", "methscan_vmr", "methscan_dmr", "allcools",
+                               "methylvi_allcools", "methylvi_vmr", "methylvi_vmr_dmr"}
         if unknown:
             raise WorkflowError("unknown routes: %s" % ", ".join(sorted(unknown)))
+        selected = close_routes({name: name in requested for name in {
+            "scanpy", "methscan_vmr", "methscan_dmr", "allcools", "methylvi_allcools",
+            "methylvi_vmr", "methylvi_vmr_dmr",
+        }})
+        candidate_tasks = make_tasks(selected, cfg["analysis"])
+        preflight = validate(project, required_stages=required_environment_stages(candidate_tasks),
+                             selected_routes={name for name, enabled in selected.items() if enabled})
+        if preflight["status"] != "valid":
+            raise WorkflowError("preflight failed: %s" % "; ".join(preflight["errors"]))
+        available = preflight["routes"]
+        blocked = {name for name in requested if not available.get(name)}
         if blocked:
             raise WorkflowError("routes lack required inputs: %s" % ", ".join(sorted(blocked)))
-        selected = close_routes({name: name in requested for name in available})
         newly_blocked = {name for name, enabled in selected.items() if enabled and not available.get(name)}
         if newly_blocked:
             raise WorkflowError("route prerequisites lack required inputs: %s" % ", ".join(sorted(newly_blocked)))
-    cfg = load_project(project)
     tasks = make_tasks(selected, cfg["analysis"])
     if not tasks:
         raise WorkflowError("no executable task was selected")
+    commands = cfg["analysis"].get("task_commands") or {}
+    missing = [item["id"] for item in tasks if not task_is_implemented(item["id"], commands)]
+    if missing:
+        raise WorkflowError("workflow contains tasks without an implementation: %s" % ", ".join(missing))
     root = Path(project).resolve()
     run_dir = root / ".workflow" / "runs" / run_id
     if run_dir.exists() and any(run_dir.iterdir()):
