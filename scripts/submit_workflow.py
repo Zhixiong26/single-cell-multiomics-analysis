@@ -61,12 +61,52 @@ def completed_evidence(run_dir: Path, task_id: str, input_signature: str) -> boo
         status = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+    outputs_valid = True
+    for value in status.get("outputs", []):
+        path = Path(value)
+        if not path.exists():
+            outputs_valid = False
+            break
+        if path.name == "task_outputs.json":
+            try:
+                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
+            except (OSError, ValueError, TypeError):
+                outputs_valid = False
+                break
+            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
+                outputs_valid = False
+                break
     return (status.get("status") == "complete" and status.get("return_code") == 0
-            and status.get("input_signature") == input_signature)
+            and status.get("input_signature") == input_signature and outputs_valid)
 
 
 def task_is_implemented(task_id: str, commands: dict) -> bool:
     return True
+
+
+def slurm_job_state(job_id: str) -> str:
+    """Return the current Slurm state or fail closed when it cannot be resolved."""
+    try:
+        queued = subprocess.check_output(
+            ["squeue", "-h", "-j", str(job_id), "-o", "%T"],
+            stderr=subprocess.STDOUT,
+        ).decode("utf-8").strip().splitlines()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkflowError("cannot query squeue for job %s: %s" % (job_id, exc))
+    if queued:
+        return queued[0].strip().upper().split("+", 1)[0]
+    try:
+        history = subprocess.check_output(
+            ["sacct", "-n", "-X", "-j", str(job_id), "--format=State", "--parsable2"],
+            stderr=subprocess.STDOUT,
+        ).decode("utf-8").strip().splitlines()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkflowError("cannot query sacct for job %s: %s" % (job_id, exc))
+    states = [line.split("|", 1)[0].strip().upper().split("+", 1)[0]
+              for line in history if line.split("|", 1)[0].strip()]
+    if not states:
+        raise WorkflowError("Slurm job %s is absent from both squeue and sacct; refusing duplicate submission" % job_id)
+    return states[0]
 
 
 def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
@@ -113,10 +153,7 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
     submissions_path = run_dir / "submissions.json"
     previous = json.loads(submissions_path.read_text(encoding="utf-8")) if submissions_path.is_file() else []
     records = {item["task"]: item for item in previous}
-    job_ids = {
-        task_id: str(record["job_id"]) for task_id, record in records.items()
-        if record.get("status") in {"submitted", "running"} and record.get("job_id")
-    }
+    job_ids = {}
     max_parallel = max(1, int(scheduler.get("max_parallel", 2)))
     limited_profiles = set(scheduler.get("limited_profiles") or ["methscan_branch", "dmr", "feature_builder", "trainer"])
     throttle_slots = [None] * max_parallel
@@ -129,7 +166,16 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
             continue
         existing = records.get(task_id)
         if existing and existing.get("status") in {"submitted", "running"} and existing.get("job_id"):
-            continue
+            if backend != "slurm":
+                raise WorkflowError("non-Slurm task %s has a stale in-progress submission record" % task_id)
+            state = slurm_job_state(str(existing["job_id"]))
+            existing["scheduler_state"] = state
+            if state in {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "REQUEUED", "RESIZING"}:
+                job_ids[task_id] = str(existing["job_id"])
+                write_json(submissions_path, [records[x["id"]] for x in plan["tasks"] if x["id"] in records])
+                continue
+            existing["status"] = "retryable"
+            existing["previous_job_id"] = str(existing["job_id"])
         snapshot_path = run_dir / "resource_snapshots" / (task_id + ".json")
         snapshot = inspect(root, item["profile"])
         write_json(snapshot_path, snapshot)

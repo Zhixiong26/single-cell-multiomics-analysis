@@ -24,7 +24,8 @@ from init_project import main as unused_init_main  # noqa: F401,E402
 from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
 from inspect_run import inspect as inspect_run  # noqa: E402
 from plan_workflow import make_tasks  # noqa: E402
-from validate_project import validate  # noqa: E402
+from submit_workflow import slurm_job_state  # noqa: E402
+from validate_project import allc_cell_id, validate, validate_allc_record  # noqa: E402
 
 
 class SkillTests(unittest.TestCase):
@@ -98,6 +99,42 @@ class SkillTests(unittest.TestCase):
                 self.assertEqual(result["status"], "valid")
                 self.assertEqual(result["routes"]["scanpy"], flags[0])
                 self.assertEqual(result["routes"]["methscan_vmr"], flags[1])
+                self.assertEqual(load_project(project)["schema_version"], 2)
+
+    def test_allc_cell_ids_support_common_and_custom_names(self):
+        row = {"sample_id": "lung-S11-m1", "cell_id_prefix": "lung-S11-m1",
+               "allc_cell_id_regex": "", "allc_cell_id_replacement": ""}
+        self.assertEqual(allc_cell_id(Path("AAACCTGAGAAACCAT-1.allc.tsv.gz"), row),
+                         "lung-S11-m1_AAACCTGAGAAACCAT-1")
+        row.update({"allc_cell_id_regex": r"allc_(?P<cell_id>.+)\.tsv\.gz$"})
+        self.assertEqual(allc_cell_id(Path("allc_lung-S11-m1_sc10.tsv.gz"), row),
+                         "lung-S11-m1_sc10")
+
+    def test_full_validation_checks_every_allc_and_approved_dmr_labels(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = self.generate(root, "paired")
+            allc_root = root / "input/allc"
+            second = allc_root / "AAAG-1.allc.tsv.gz"
+            with gzip.open(str(second), "wt") as handle:
+                handle.write("chr1\t2\t+\tCGN\t0\t2\t1\n")
+            Path(str(second) + ".tbi").touch()
+            annotation = root / "input/annotation.tsv"
+            annotation.write_text("cell_id\tcell_type\nS1_AAAC-1\tTypeA\nS1_AAAG-1\tTypeB\n")
+            project_cfg = json.loads((project / "config/project.yaml").read_text())
+            project_cfg["annotation"] = {"table": str(annotation), "profile": None,
+                                             "review_status": "approved", "cell_id_column": "cell_id",
+                                             "cell_type_column": "cell_type"}
+            (project / "config/project.yaml").write_text(json.dumps(project_cfg))
+            analysis = json.loads((project / "config/analysis.yaml").read_text())
+            analysis["analysis"]["methscan"]["min_cells"] = 1
+            (project / "config/analysis.yaml").write_text(json.dumps(analysis))
+            result = validate(project, mode="full", workers=2)
+            self.assertEqual(result["status"], "valid")
+            self.assertTrue(result["routes"]["methscan_dmr"])
+            self.assertEqual(len(result["allc_validation"]), 2)
+            annotation.write_text("cell_id\tcell_type\nS1_AAAC-1\tTypeA\nS1_AAAG-1\tUnassigned\n")
+            self.assertFalse(validate(project)["routes"]["methscan_dmr"])
 
     def test_bad_checksum_and_duplicate_sample(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -189,9 +226,13 @@ class SkillTests(unittest.TestCase):
             code = subprocess.call([sys.executable, str(ROOT / "scripts" / "inspect_run.py"), "--project", str(project), "--run-id", "unit"])
             self.assertEqual(code, 0)
             self.assertTrue((project / ".workflow/runs/unit/workflow.COMPLETE").is_file())
+            artifact = project / ".workflow/runs/unit/tasks/scanpy/artifact"
+            artifact.unlink()
+            self.assertNotEqual(inspect_run(project, "unit")["status"], "complete")
             subprocess.check_call([sys.executable, str(ROOT / "scripts" / "submit_workflow.py"), "--project", str(project), "--run-id", "unit"])
             resumed = json.loads((project / ".workflow/runs/unit/submissions.json").read_text())
-            self.assertTrue(all(item.get("resumed") for item in resumed))
+            self.assertTrue((project / ".workflow/runs/unit/tasks/scanpy/artifact").is_file())
+            self.assertTrue(any(item.get("resumed") for item in resumed))
 
     def test_inspect_never_completes_a_partial_plan_or_marker_only_task(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -225,6 +266,50 @@ class SkillTests(unittest.TestCase):
         self.assertIn("allcools_features", identifiers)
         self.assertIn("methylvi_allcools_10000", identifiers)
         self.assertTrue(all(set(item["dependencies"]).issubset(identifiers) for item in tasks))
+        for route in routes:
+            selected = {name: name == route for name in routes}
+            planned = make_tasks(selected, analysis)
+            known = {item["id"] for item in planned}
+            self.assertTrue(known)
+            self.assertTrue(all(set(item["dependencies"]).issubset(known) for item in planned))
+
+    def test_context_and_nonhuman_contigs_are_configuration_driven(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            allc = root / "cell.allc.tsv.gz"
+            with gzip.open(str(allc), "wt") as handle:
+                handle.write("1\t1\t+\tCHN\t0\t2\t1\n")
+            checked = validate_allc_record(allc, context="CHN", full=True)
+            self.assertEqual(checked["records_checked"], 1)
+            chrom = root / "genome.sizes"
+            chrom.write_text("1\t1000\n")
+            blacklist = root / "blacklist.bed"
+            blacklist.write_text("")
+            dmr = root / "dmr.tsv"
+            dmr.write_text("1\t10\t20\tx\tx\tx\tx\t0.1\t0.6\tgroup_A\t0.001\tx\n")
+            summary = root / "summary.tsv"
+            summary.write_text(
+                "status\tdmr_file\tcell_type_a\tcell_type_b\tcomparison\n"
+                "complete\t%s\tTypeA\tTypeB\tA_vs_B\n" % dmr
+            )
+            output = root / "out"
+            subprocess.check_call([
+                sys.executable, str(ROOT / "assets/project-template/Scripts/Methylvi/vmr_dmr/01_prepare_all_unique_pooled_dmrs.py"),
+                "--pairwise-summary", str(summary), "--blacklist", str(blacklist),
+                "--chrom-sizes", str(chrom), "--output-dir", str(output), "--sort-threads", "1",
+            ])
+            self.assertTrue((output / "all_unique_hypo_DMRs.merged.bed").is_file())
+
+    def test_slurm_requires_explicit_partition_allow_list(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            scheduler = json.loads((project / "config/scheduler.yaml").read_text())
+            scheduler["backend"] = "slurm"
+            scheduler["partitions"] = []
+            (project / "config/scheduler.yaml").write_text(json.dumps(scheduler))
+            result = validate(project)
+            self.assertEqual(result["status"], "invalid")
+            self.assertIn("partitions", " ".join(result["errors"]))
 
     def test_slurm_reserved_and_observed_memory_are_distinct(self):
         fixtures = ROOT / "tests" / "fixtures"
@@ -243,6 +328,15 @@ class SkillTests(unittest.TestCase):
         with self.assertRaises(WorkflowError):
             choose(nodes, scheduler, too_large)
         self.assertEqual([item for item in nodes if item["name"] == "node-c"][0]["state"], "down")
+
+    def test_slurm_resume_distinguishes_active_terminal_and_unknown_jobs(self):
+        with mock.patch("submit_workflow.subprocess.check_output", return_value=b"RUNNING\n"):
+            self.assertEqual(slurm_job_state("101"), "RUNNING")
+        with mock.patch("submit_workflow.subprocess.check_output", side_effect=[b"", b"FAILED|\n"]):
+            self.assertEqual(slurm_job_state("102"), "FAILED")
+        with mock.patch("submit_workflow.subprocess.check_output", side_effect=[b"", b""]):
+            with self.assertRaises(WorkflowError):
+                slurm_job_state("103")
 
 
 if __name__ == "__main__":

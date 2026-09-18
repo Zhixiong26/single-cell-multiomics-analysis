@@ -52,6 +52,7 @@ def summarize_workflow(plan, run_dir):
     summary_task = next(item for item in plan["tasks"] if item["id"] == "workflow_summary")
     failures = []
     for dependency in summary_task["dependencies"]:
+        dependency_plan = next(item for item in plan["tasks"] if item["id"] == dependency)
         task_dir = run_dir / "tasks" / dependency
         marker = task_dir / "task.COMPLETE"
         status_path = task_dir / "task_status.json"
@@ -59,7 +60,11 @@ def summarize_workflow(plan, run_dir):
             failures.append("%s lacks completion evidence" % dependency)
             continue
         status = json.loads(status_path.read_text(encoding="utf-8"))
+        expected_signature = signature({"command": status.get("command", []),
+                                        "parameters": dependency_plan.get("parameters", {})})
         if (status.get("status") != "complete" or status.get("input_signature") != plan.get("input_signature")
+                or status.get("code_signature") != plan.get("code_signature")
+                or status.get("task_signature") != expected_signature
                 or not recorded_outputs_exist(status.get("outputs", []))):
             failures.append("%s has invalid status or input signature" % dependency)
     if failures:

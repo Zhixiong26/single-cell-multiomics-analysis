@@ -91,6 +91,8 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     samples = load_samples(project, require_paths=require_paths)
     active = [row for row in samples if row["include"]]
     errors, warnings = [], []
+    if int(cfg.get("schema_version", 1)) == 1:
+        warnings.append("schema v1 is deprecated; migrate the project configuration to schema v2")
     rna_samples = [row for row in active if row["rna_path"]]
     allc_samples = [row for row in active if row["allc_root"]]
     allc_inventory, allc_cell_ids, validation_jobs = [], [], []
@@ -199,6 +201,20 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     missing_stages = sorted(required_stages - declared_stages)
     if missing_stages:
         errors.append("required environment stages are absent: %s; run tools/bootstrap_environments.py --project PROJECT --execute" % ", ".join(missing_stages))
+
+    scheduler = cfg.get("scheduler") or {}
+    backend = scheduler.get("backend", "local")
+    if backend not in {"local", "slurm"}:
+        errors.append("scheduler.backend must be local or slurm")
+    if backend == "slurm" and not scheduler.get("partitions"):
+        errors.append("Slurm backend requires a non-empty scheduler.partitions allow-list")
+    profiles = scheduler.get("profiles") or {}
+    required_profiles = {"scanpy", "io_builder", "serial", "methscan_branch", "dmr",
+                         "dmr_prepare", "feature_builder", "trainer", "plot", "summary"}
+    for name in sorted(required_profiles):
+        profile = profiles.get(name) or profiles.get("default")
+        if not profile or any(level not in profile for level in ("floor", "target", "ceiling")):
+            errors.append("scheduler resource profile %s lacks floor/target/ceiling" % name)
 
     minimum = int(cfg.get("analysis", {}).get("methscan", {}).get("min_cells", 6))
     selected_annotation = annotation_rows

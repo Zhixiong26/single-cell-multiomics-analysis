@@ -47,8 +47,8 @@ ln -s "$HOME/single-cell-multiomics-analysis" \
 - 对输入数据和参考文件具有只读权限；
 - 系统中具有 `conda` 或 `mamba`；已有兼容分析环境可以复用，没有时由 Skill 创建；
 - Slurm 模式下可以运行 `sinfo`、`scontrol`、`squeue`、`sbatch` 和 `sacct`；
-- genome manifest 显式提供 `chrom_sizes`、blacklist 和可选 TSS BED，推荐同时提供 SHA-256；
-- DMR 路线需要非空、唯一的 `cell_id` 和有效的 `cell_type`，且至少两个细胞类型达到配置的最小细胞数。
+- 甲基化路线必须显式提供 `chrom_sizes` 和 blacklist；TSS BED 可选。Skill 自动计算 SHA-256，若用户声明期望 checksum，则必须一致；
+- DMR 路线需要 `review_status: approved`、非空且唯一的 `cell_id`、无占位标签的 `cell_type`，且至少两个细胞类型达到配置的最小细胞数。
 
 Skill 会先只读发现兼容环境。缺失的 Scanpy/ALLCools、MethSCAn 或 MethylVI 环境会在项目 `.environments/` 下隔离创建、验证并写入 `config/environments.tsv`；不会升级或修改已经存在的共享环境。
 
@@ -57,7 +57,7 @@ Skill 会先只读发现兼容环境。缺失的 Scanpy/ALLCools、MethSCAn 或 
 下面是配对多组学的最小示例。RNA-only 或 ALLC-only 项目可以将另一种输入留空。
 
 ```yaml
-schema_version: 1
+schema_version: 2
 project_id: example_multiome
 organism: human
 
@@ -71,7 +71,9 @@ references:
   tss_bed_sha256: REPLACE_WITH_SHA256
 
 annotation:
-  path: /data/annotation/cell_id_cell_type.tsv
+  table: /data/annotation/cell_id_cell_type.tsv
+  profile: null
+  review_status: approved
   cell_id_column: cell_id
   cell_type_column: cell_type
 
@@ -85,6 +87,8 @@ samples:
     allc_root: /data/sample_A/allc
     allc_glob: "**/*.allc.tsv.gz"
     cell_id_prefix: sample_A
+    allc_cell_id_regex: ""
+    allc_cell_id_replacement: ""
 
   - sample_id: sample_B
     condition: treatment
@@ -95,30 +99,32 @@ samples:
     allc_root: /data/sample_B/allc
     allc_glob: "**/*_allc.gz"
     cell_id_prefix: sample_B
+    allc_cell_id_regex: ""
+    allc_cell_id_replacement: ""
 
 environments:
   - stage: orchestrator
-    python: /envs/allcools/bin/python
-    executable: /envs/allcools/bin/python
-    version_command: /envs/allcools/bin/python --version
+    python: /path/to/analysis-core/bin/python
+    executable: /path/to/analysis-core/bin/python
+    version_command: /path/to/analysis-core/bin/python --version
     required: 1
 
   - stage: scanpy_allcools
-    python: /envs/allcools/bin/python
-    executable: /envs/allcools/bin/python
-    version_command: /envs/allcools/bin/python --version
+    python: /path/to/allcools/bin/python
+    executable: /path/to/allcools/bin/python
+    version_command: /path/to/allcools/bin/python --version
     required: 1
 
   - stage: methscan
-    python: /envs/methscan/bin/python
-    executable: /envs/methscan/bin/methscan
-    version_command: /envs/methscan/bin/methscan --version
+    python: /path/to/methscan/bin/python
+    executable: /path/to/methscan/bin/methscan
+    version_command: /path/to/methscan/bin/methscan --version
     required: 1
 
   - stage: methylvi
-    python: /envs/methylvi/bin/python
-    executable: /envs/methylvi/bin/python
-    version_command: /envs/methylvi/bin/python --version
+    python: /path/to/methylvi/bin/python
+    executable: /path/to/methylvi/bin/python
+    version_command: /path/to/methylvi/bin/python --version
     required: 1
 
 scheduler:
@@ -129,6 +135,12 @@ scheduler:
   allow_nodes: []
   exclude_nodes: []
   max_parallel: 2
+  validation_workers: 4
+  limited_profiles:
+    - methscan_branch
+    - dmr
+    - feature_builder
+    - trainer
   memory_headroom_mb: 4096
 
 analysis:
@@ -171,16 +183,22 @@ PROJECT=/work/example_multiome
   --project "$PROJECT" \
   --execute
 
-# 环境完成后执行完整校验
+# 环境完成后执行日常快速校验
 
 "$PYTHON" "$PROJECT/tools/validate_project.py" \
   --project "$PROJECT" \
+  --mode quick \
   --json-out "$PROJECT/preflight.json"
+
+# 首次正式运行或输入/schema/模板变化后执行全量流式校验
+"$PYTHON" "$PROJECT/tools/validate_project.py" \
+  --project "$PROJECT" --mode full --workers 8 \
+  --json-out "$PROJECT/full-preflight.json"
 ```
 
 bootstrap 优先复用通过导入测试的已有环境；缺失 profile 默认创建到 `PROJECT/.environments/`。计划和执行证据保存在 `.workflow/environment-bootstrap/`。如需使用其他可写位置，可传入 `--prefix-root`。
 
-校验内容包括配置 schema、文件和 `.tbi`、ALLC 列和 CG context、`mc <= cov`、cell ID、cell type、参考文件 checksum、环境版本和路线依赖。校验不会修改输入数据或共享环境。
+quick 模式逐文件检查索引、格式和有界记录；full 模式并行流式检查全部 ALLC 的列、context、排序和 `mc <= cov`。正式提交要求与当前输入签名一致的 full 证据；两种校验都不会修改输入数据或共享环境。
 
 ### 6. 规划 DAG 和 dry-run
 
@@ -198,7 +216,7 @@ bootstrap 优先复用通过导入测试的已有环境；缺失 profile 默认�
 
 `plan_workflow.py` 只生成 DAG，不提交作业。`--routes auto` 根据输入启用可运行路线，也可以显式传入逗号分隔的路线名。
 
-Scanpy 已包含默认执行适配器。正式运行 MethSCAn、ALLCools 或 MethylVI 前，需要由 Codex 根据用户的环境和输入在 `config/analysis.yaml` 中生成相应的 `analysis.task_commands`。缺少命令时，生产提交会在任何 `sbatch` 之前被阻止；dry-run 仍可用于审核 DAG 和资源方案。
+Scanpy、MethSCAn、ALLCools 和 MethylVI 均有内置执行适配器，并自动使用 `environments.tsv` 中对应阶段的 Python。`analysis.task_commands` 仅用于专家覆盖；覆盖命令仍必须产生声明的输出证据。
 
 ### 7. 正式提交
 
@@ -213,6 +231,8 @@ Scanpy 已包含默认执行适配器。正式运行 MethSCAn、ALLCools 或 Met
 每个 Slurm 任务在执行 `sbatch` 前都会重新读取 `sinfo`、`scontrol show nodes`、全局 `squeue` 和当前用户 `squeue`。资源报告分别保存 Slurm 可调度 CPU/内存和操作系统观测到的 `CPULoad`/`FreeMem`。
 
 当资源低于正确性所需 floor、分区不存在或 Slurm 查询失败时，不会强行提交。默认按 partition 调度，不固定节点。local 后端使用同一个 DAG，但受到 `max_threads`、`max_memory` 和并发设置限制。
+
+所有正式结果写入 `PROJECT/Results/runs/<run_id>/`。同一 run 中断后可再次执行 submit：已完成或仍在调度器中的任务不会重复提交，失败或产物缺失的任务会按依赖恢复。
 
 ### 8. 监控和更新报告
 
@@ -240,22 +260,21 @@ PROJECT/.workflow/runs/<run_id>/
 └── workflow.COMPLETE
 ```
 
+对应分析结果位于 `PROJECT/Results/runs/<run_id>/`，不同 run 不共享可写结果目录。
+
 不能只根据作业已经提交或 Slurm 显示 `COMPLETED` 判断分析完成。任务输出、签名、机器可读 summary 和完成标记必须一致。
 
 ### 9. 测试
 
 ```bash
-/envs/allcools/bin/python -m unittest discover \
-  -s tests \
-  -p 'test_*.py' \
-  -v
+PYTHON_EXE=/path/to/python-3.9-or-newer bash tests/run_tests.sh
 
-/envs/allcools/bin/python \
+/path/to/python-3.9-or-newer \
   "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" \
   "$HOME/single-cell-multiomics-analysis"
 ```
 
-仓库测试覆盖 RNA-only、ALLC-only、配对多组学、环境 bootstrap 计划、重复 cell ID、错误 checksum、缺失环境、Slurm 节点状态、资源不足和 local fallback。
+仓库测试覆盖 RNA-only、ALLC-only、配对多组学、环境 bootstrap、完成证据、路线闭包、常见 ALLC 命名、错误 checksum、Slurm 资源和 local backend。
 
 ### 10. 进一步文档
 
@@ -329,9 +348,9 @@ PROJECT=/work/example_multiome
 
 The bootstrapper reuses compatible environments read-only and creates missing profiles under `PROJECT/.environments/` from bundled versioned specs. It verifies imports or executables before updating `config/environments.tsv`; it never upgrades a discovered shared environment.
 
-Review the preflight report, DAG, task commands, and resource plans. Scanpy has a default execution adapter. MethSCAn, ALLCools, and MethylVI production tasks require commands adapted to the declared inputs and environments in `config/analysis.yaml`; submission is blocked before the first `sbatch` if any planned command is missing.
+Review the preflight report, DAG, and resource plans. Built-in adapters cover Scanpy, MethSCAn, ALLCools, and MethylVI and select the declared stage environment. `analysis.task_commands` is an expert override, not a required setup step.
 
-To execute an approved run, repeat `submit_workflow.py` without `--dry-run`. Each Slurm task receives a fresh resource query immediately before submission. Local execution uses the same DAG under configured thread, memory, and concurrency limits.
+To execute an approved run, repeat `submit_workflow.py` without `--dry-run`. Production submission requires matching full-validation evidence and creates it when absent. Each Slurm task receives a fresh resource query immediately before submission. Local execution uses the same DAG under configured limits. Results are isolated under `Results/runs/<run_id>/`, and re-submission resumes incomplete work.
 
 ### Inspect completion
 

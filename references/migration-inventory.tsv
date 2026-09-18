@@ -1,6 +1,7 @@
 source_scope	template_scope	portability_change
 Scripts/Environment	assets/project-template/Scripts/Environment	Environment roots discovered from user/site configuration
 Environment bootstrap	assets/project-template/environment-specs	Missing profiles are created in isolated prefixes from versioned specs
+Scripts/Common	assets/project-template/Scripts/Common	Built-in task adapters enforce run-scoped outputs, stage environments, signatures, and completion evidence
 Scripts/Scanpy	assets/project-template/Scripts/Scanpy	Sample manifest and annotation-signature guard replace project labels
 Scripts/Methscan	assets/project-template/Scripts/Methscan	Samples, paths, thresholds, executables, and resources are injected
 Scripts/Methylvi/allcools	assets/project-template/Scripts/Methylvi/allcools	Genome, inputs, outputs, environments, and cell count are injected
