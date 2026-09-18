@@ -20,11 +20,17 @@ def parse_args():
         default=int(os.environ.get("SLURM_CPUS_PER_TASK", "16")),
     )
     parser.add_argument("--compresslevel", type=int, default=1)
+    parser.add_argument("--mc-context", default="CGN")
     return parser.parse_args()
 
 
+def context_matches(observed, expected):
+    observed, expected = observed.upper(), expected.upper()
+    return observed.startswith(expected[:-1]) if expected.endswith("N") else observed == expected
+
+
 def convert_one(task):
-    row, cov_dir, compresslevel = task
+    row, cov_dir, compresslevel, mc_context = task
     src = Path(row["source_path"])
     cell_id = row["cell_id"]
     out = cov_dir / f"{cell_id}.cov.gz"
@@ -43,8 +49,7 @@ def convert_one(task):
             if len(fields) < 6:
                 raise ValueError(f"{src}:{line_number}: expected at least 6 ALLC columns")
             chrom, pos_s, _strand, context, mc_s, cov_s = fields[:6]
-            # ALLCools contexts such as CGN are CpG; CH contexts are excluded.
-            if not context.upper().startswith("CG"):
+            if not context_matches(context, mc_context):
                 continue
             try:
                 pos = int(pos_s)
@@ -113,7 +118,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cov_dir = args.output_dir / "cov"
     cov_dir.mkdir()
-    tasks = [(row, cov_dir, args.compresslevel) for row in rows]
+    tasks = [(row, cov_dir, args.compresslevel, args.mc_context) for row in rows]
 
     results = []
     with cf.ProcessPoolExecutor(max_workers=args.workers) as executor:
@@ -148,7 +153,7 @@ def main():
         "workers": args.workers,
         "compresslevel": args.compresslevel,
         "format": "CpG-only Bismark coverage gzip",
-        "context_rule": "ALLC context startswith CG",
+        "context_rule": args.mc_context,
         "mCG_definition": "sum(methylated CpG reads) / sum(total CpG reads)",
     }
     with (args.output_dir / "conversion_summary.json").open("w") as handle:

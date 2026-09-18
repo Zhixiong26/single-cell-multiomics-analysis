@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover ALLC files and keep cells present in the non-NA Scanpy whitelist."""
+"""Discover ALLCs from explicit sample rows and retain approved annotated cells."""
 
 import argparse
 import csv
@@ -9,20 +9,15 @@ from collections import Counter
 from pathlib import Path
 
 
-ALLC_NAME_RE = re.compile(
-    r"^(?:(?P<sample>[A-Za-z0-9]+)_)?"
-    r"(?P<barcode>[ACGT]{17})"
-    r"(?:_allc|\.allc(?:\.tsv)?)\.gz$"
-)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--allc-source", type=Path, required=True)
+    parser.add_argument("--samples-tsv", type=Path)
+    parser.add_argument("--allc-source", type=Path)
     parser.add_argument("--scanpy-annotation", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--sample", action="append", dest="samples", required=True)
+    parser.add_argument("--sample", action="append", dest="samples")
     parser.add_argument("--exclude-cell-type", default="NA")
+    parser.add_argument("--annotation-approved", action="store_true")
     return parser.parse_args()
 
 
@@ -31,72 +26,68 @@ def read_tsv(path):
         return list(csv.DictReader(handle, delimiter="\t"))
 
 
-def infer_sample(path, source, requested_samples, filename_sample=None):
-    if filename_sample in requested_samples:
-        return filename_sample
+def derive_cell_name(path, row):
+    regex = (row.get("allc_cell_id_regex") or "").strip()
+    replacement = row.get("allc_cell_id_replacement") or ""
+    if regex:
+        match = re.search(regex, path.name)
+        if not match:
+            raise ValueError("ALLC filename does not match configured cell-ID regex: %s" % path)
+        value = match.expand(replacement) if replacement else (match.groupdict().get("cell_id") or match.group(0))
+    else:
+        value = path.name
+        for suffix in (".allc.tsv.gz", "_allc.gz", ".allc.gz"):
+            if value.endswith(suffix):
+                value = value[:-len(suffix)]
+                break
+    prefix = (row.get("cell_id_prefix") or row["sample_id"]).strip()
+    cell_id = value if not prefix or value.startswith(prefix + "_") else prefix + "_" + value
+    return value, cell_id
 
-    relative = path.relative_to(source)
-    hits = set()
-    for part in relative.parts[:-1]:
-        tokens = re.split(r"[^A-Za-z0-9]+", part)
-        hits.update(sample for sample in requested_samples if sample in tokens)
 
-    if len(hits) == 1:
-        return next(iter(hits))
-    if len(hits) > 1:
-        raise ValueError("Ambiguous sample for ALLC path: %s" % path)
-    return None
-
-
-def discover_allcs(source, requested_samples):
+def discover_allcs(sample_rows):
     rows = []
     seen = set()
-
-    for path in sorted(source.rglob("*.gz")):
-        match = ALLC_NAME_RE.match(path.name)
-        if not match:
-            continue
-
-        sample = infer_sample(
-            path,
-            source,
-            requested_samples,
-            filename_sample=match.group("sample"),
-        )
-        if sample is None:
-            continue
-
-        barcode = match.group("barcode")
-        cell_id = "%s_%s" % (sample, barcode)
-        if cell_id in seen:
-            raise ValueError("Duplicate ALLC cell_id discovered: %s" % cell_id)
-        seen.add(cell_id)
-
-        index = Path(str(path) + ".tbi")
-        rows.append({
-            "sample_id": sample,
-            "barcode": barcode,
-            "cell_id": cell_id,
-            "source_path": str(path.resolve()),
-            "source_index": str(index.resolve()) if index.is_file() else "NA",
-        })
-
+    for sample in sample_rows:
+        source = Path(sample["allc_root"]).resolve()
+        pattern = (sample.get("allc_glob") or "**/*.allc.tsv.gz").strip()
+        paths = sorted(path for path in source.glob(pattern) if path.is_file())
+        if not paths:
+            raise ValueError("No ALLC files found for sample %s with %s" % (sample["sample_id"], pattern))
+        for path in paths:
+            barcode, cell_id = derive_cell_name(path, sample)
+            if cell_id in seen:
+                raise ValueError("Duplicate ALLC cell_id discovered: %s" % cell_id)
+            seen.add(cell_id)
+            index = Path(str(path) + ".tbi")
+            if not index.is_file():
+                raise FileNotFoundError("Missing ALLC index: %s" % index)
+            rows.append({"sample_id": sample["sample_id"], "barcode": barcode,
+                         "cell_id": cell_id, "source_path": str(path.resolve()),
+                         "source_index": str(index.resolve())})
     return rows
 
 
 def main():
     args = parse_args()
-    source = args.allc_source.resolve()
-    requested_samples = set(args.samples)
-
-    if not source.is_dir():
-        raise NotADirectoryError(source)
+    if not args.annotation_approved:
+        raise ValueError("MethSCAn cell-type routes require approved annotation")
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError("Scanpy selection output is not empty: %s" % args.output_dir)
 
-    allc_rows = discover_allcs(source, requested_samples)
+    if args.samples_tsv:
+        sample_rows = [row for row in read_tsv(args.samples_tsv)
+                       if row.get("include", "").lower() in {"1", "true", "yes"} and row.get("allc_root")]
+    elif args.allc_source and args.samples:
+        sample_rows = [{"sample_id": sample, "allc_root": str(args.allc_source),
+                        "allc_glob": "**/*.gz", "cell_id_prefix": sample}
+                       for sample in args.samples]
+    else:
+        raise ValueError("provide --samples-tsv or legacy --allc-source/--sample arguments")
+    requested_samples = {row["sample_id"] for row in sample_rows}
+    allc_rows = discover_allcs(sample_rows)
     if not allc_rows:
-        raise ValueError("No matching per-cell ALLC files found below %s" % source)
+        raise ValueError("No matching per-cell ALLC files found")
 
     discovered_by_sample = Counter(row["sample_id"] for row in allc_rows)
     missing_samples = sorted(requested_samples.difference(discovered_by_sample))
@@ -128,7 +119,7 @@ def main():
         cell_type = (annotation_row.get("cell_type") or "").strip()
         if not cell_type:
             reason = "missing_scanpy_cell_type"
-        elif cell_type == args.exclude_cell_type:
+        elif cell_type in {args.exclude_cell_type, "NA", "Unassigned", "requires_review"}:
             reason = "excluded_scanpy_cell_type_%s" % args.exclude_cell_type
         else:
             reason = None

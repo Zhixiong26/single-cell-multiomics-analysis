@@ -13,11 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 SAMPLE_COLUMNS = (
     "sample_id", "condition", "batch", "include", "rna_path", "rna_format",
-    "allc_root", "allc_glob", "cell_id_prefix",
+    "allc_root", "allc_glob", "cell_id_prefix", "allc_cell_id_regex",
+    "allc_cell_id_replacement",
 )
+LEGACY_SAMPLE_COLUMNS = SAMPLE_COLUMNS[:9]
 RNA_FORMATS = {"", "10x_mtx", "10x_zip", "10x_h5"}
 
 
@@ -92,12 +95,10 @@ def load_project(project: Path) -> Dict[str, Any]:
     cfg = load_structured(files["project"])
     analysis = load_structured(files["analysis"])
     scheduler = load_structured(files["scheduler"])
-    if cfg.get("schema_version") != SCHEMA_VERSION:
-        raise WorkflowError("project schema_version must be %d" % SCHEMA_VERSION)
-    if analysis.get("schema_version") != SCHEMA_VERSION:
-        raise WorkflowError("analysis schema_version must be %d" % SCHEMA_VERSION)
-    if scheduler.get("schema_version") != SCHEMA_VERSION:
-        raise WorkflowError("scheduler schema_version must be %d" % SCHEMA_VERSION)
+    for label, value in (("project", cfg), ("analysis", analysis), ("scheduler", scheduler)):
+        if value.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
+            raise WorkflowError("%s schema_version must be one of %s" %
+                                (label, sorted(SUPPORTED_SCHEMA_VERSIONS)))
     cfg["analysis"] = analysis.get("analysis", {})
     cfg["scheduler"] = scheduler
     cfg["project_root"] = str(files["root"])
@@ -124,8 +125,9 @@ def load_samples(project: Path, require_paths: bool = True) -> List[Dict[str, An
     files = project_files(project)
     with files["samples"].open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != SAMPLE_COLUMNS:
-            raise WorkflowError("samples.tsv columns must be exactly: %s" % "\t".join(SAMPLE_COLUMNS))
+        columns = tuple(reader.fieldnames or ())
+        if columns not in {SAMPLE_COLUMNS, LEGACY_SAMPLE_COLUMNS}:
+            raise WorkflowError("samples.tsv columns must be schema-v1 or schema-v2 columns: %s" % "\t".join(SAMPLE_COLUMNS))
         result: List[Dict[str, Any]] = []
         seen = set()
         errors = []
@@ -140,6 +142,8 @@ def load_samples(project: Path, require_paths: bool = True) -> List[Dict[str, An
             if raw["rna_format"].strip() not in RNA_FORMATS:
                 errors.append("line %d has unsupported rna_format" % line_no)
             row: Dict[str, Any] = dict(raw)
+            row["allc_cell_id_regex"] = row.get("allc_cell_id_regex") or ""
+            row["allc_cell_id_replacement"] = row.get("allc_cell_id_replacement") or ""
             row["sample_id"] = sample_id
             row["include"] = include
             row["cell_id_prefix"] = raw["cell_id_prefix"].strip() or sample_id

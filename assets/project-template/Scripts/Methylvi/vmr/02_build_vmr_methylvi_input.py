@@ -130,6 +130,7 @@ def main() -> None:
     parser.add_argument("--min-covered-percent", type=float, default=float(os.environ["VMR_MIN_COVERED_PERCENT"]))
     parser.add_argument("--target-features", type=int, default=int(os.environ["VMR_TARGET_FEATURES"]))
     parser.add_argument("--max-cells", type=int, default=0, help="Use only the first N cells for a smoke test")
+    parser.add_argument("--mc-context", default=os.environ.get("VMR_MC_CONTEXT", os.environ.get("SCMO_MC_CONTEXT", "CGN")))
     args = parser.parse_args()
     if args.threads < 1 or not 0 <= args.min_covered_percent <= 100 or args.max_cells < 0 or args.target_features < 2:
         raise ValueError("threads must be positive; min-covered-percent must be in [0,100]; max-cells non-negative")
@@ -154,7 +155,7 @@ def main() -> None:
     manifest = {
         "bed": str(args.bed.resolve()), "bed_sha256": file_sha256(args.bed),
         "allc_table_sha256": file_sha256(args.allc_table), "annotation_sha256": file_sha256(args.annotation),
-        "cells": len(cells), "source_vmrs": len(regions), "context": "CGN",
+        "cells": len(cells), "source_vmrs": len(regions), "context": args.mc_context,
     }
     manifest_path = args.work_dir / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:

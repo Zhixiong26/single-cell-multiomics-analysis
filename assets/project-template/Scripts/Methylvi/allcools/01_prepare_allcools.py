@@ -38,8 +38,8 @@ def valid_allc(path: Path) -> bool:
     )
 
 
-def convert_one(task: tuple[str, str, str, str]) -> dict[str, object]:
-    cov_string, output_string, bgzip, tabix = task
+def convert_one(task: tuple[str, str, str, str, str]) -> dict[str, object]:
+    cov_string, output_string, bgzip, tabix, mc_context = task
     cov, output = Path(cov_string), Path(output_string)
     if valid_allc(output):
         return {"cell_id": cell_id(cov), "status": "reused"}
@@ -74,7 +74,7 @@ def convert_one(task: tuple[str, str, str, str]) -> dict[str, object]:
                         raise ValueError(f"{cov}:{line_number}: duplicate CpG coordinate {chrom}:{start}")
                     previous = current
                     process.stdin.write(
-                        f"{chrom}\t{start}\t+\tCGN\t{mc}\t{mc + uc}\t1\n".encode()
+                        f"{chrom}\t{start}\t+\t{mc_context}\t{mc}\t{mc + uc}\t1\n".encode()
                     )
                     rows += 1
             process.stdin.close()
@@ -111,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allc-table", type=Path, default=Path(os.environ["SCMO_ALLC_TABLE"]))
     parser.add_argument("--threads", type=int, default=int(os.environ["SCMO_THREADS"]))
     parser.add_argument("--expected-cells", type=int, default=int(os.environ["SCMO_EXPECTED_CELLS"]))
+    parser.add_argument("--mc-context", default=os.environ.get("SCMO_MC_CONTEXT", "CGN"))
     parser.add_argument("--max-cells", type=int, default=int(os.environ.get("SCMO_MAX_CELLS", "0")))
     parser.add_argument(
         "--balanced-cohorts", action="store_true",
@@ -193,6 +194,7 @@ def main() -> None:
         "cell_ids_matched_to_annotation": sum(name in annotation.index for name, _path in selected),
         "include_unannotated": args.include_unannotated, "max_cells": args.max_cells,
         "balanced_cohorts": args.balanced_cohorts,
+        "mc_context": args.mc_context,
         "cohorts": pd.Series([name.split("_", 1)[0] for name, _path in selected]).value_counts().to_dict(),
     }
     summary["existing_allc_available"] = len(selected) if source_is_allc else sum(
@@ -238,7 +240,7 @@ def main() -> None:
             allc_paths[name] = existing_allc.resolve()
             reused_existing += 1
         else:
-            tasks.append((str(path), str(local_allc), bgzip, tabix))
+            tasks.append((str(path), str(local_allc), bgzip, tabix, args.mc_context))
 
     built = 0
     if tasks:

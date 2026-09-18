@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 
-PRIMARY = re.compile(r"^chr(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
+CHROM_RANK = {}
 
 
 @dataclass(frozen=True)
@@ -57,6 +57,7 @@ class Region:
 def args_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-dir", type=Path, required=True)
+    p.add_argument("--chrom-sizes", type=Path, required=True)
     p.add_argument("--methscan", type=Path, required=True)
     p.add_argument("--methscan-python", type=Path, required=True)
     p.add_argument("--raw-p", type=float, default=0.01)
@@ -85,14 +86,7 @@ def read_tsv(path):
 
 
 def chrom_key(chrom):
-    suffix = chrom[3:] if chrom.startswith("chr") else chrom
-    if suffix.isdigit():
-        return (0, int(suffix))
-    if suffix == "X":
-        return (0, 23)
-    if suffix == "Y":
-        return (0, 24)
-    return (1, chrom)
+    return (CHROM_RANK.get(chrom, len(CHROM_RANK)), chrom)
 
 
 def stage_fallback(args, comparisons):
@@ -174,7 +168,7 @@ def parse_dmr_file(path, row, args):
             f = line.rstrip("\n").split("\t")
             if len(f) != 12:
                 raise ValueError(f"{path}:{number}: expected 12 columns")
-            if not PRIMARY.fullmatch(f[0]):
+            if f[0] not in CHROM_RANK:
                 continue
             start, end = int(f[1]), int(f[2])
             meth_a, meth_b, raw_p = float(f[7]), float(f[8]), float(f[10])
@@ -540,6 +534,12 @@ def stage_plots(args, matrix_summary):
 
 def main():
     args = args_parser(); args.run_dir = args.run_dir.resolve()
+    global CHROM_RANK
+    with args.chrom_sizes.open() as handle:
+        chromosomes = [line.split("\t", 1)[0].strip() for line in handle if line.strip() and not line.startswith("#")]
+    if not chromosomes or len(chromosomes) != len(set(chromosomes)):
+        raise ValueError("chrom-sizes must contain unique chromosomes")
+    CHROM_RANK = {chrom: index for index, chrom in enumerate(chromosomes)}
     for value in (args.top_per_cell_type, args.min_cells, args.threads, args.matrix_workers, args.zscore_min_observed_cells, args.dpi):
         if value < 1: raise ValueError("Integer parameters must be positive")
     comparisons = read_tsv(args.run_dir / "07_methdiff" / "pairwise_summary.tsv")

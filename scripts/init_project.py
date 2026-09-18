@@ -103,8 +103,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     intake = load_structured(args.intake)
-    if intake.get("schema_version") != 1:
-        raise WorkflowError("intake schema_version must be 1")
+    if intake.get("schema_version") not in {1, 2}:
+        raise WorkflowError("intake schema_version must be 1 or 2")
     output = args.output.resolve()
     if output.exists() and any(output.iterdir()):
         raise WorkflowError("refusing non-empty output directory: %s" % output)
@@ -120,7 +120,7 @@ def main() -> int:
         raise WorkflowError("project_id is required")
     references = intake.get("references") or {}
     project_cfg = {
-        "schema_version": 1,
+        "schema_version": 2,
         "project": {
             "id": project_id, "root": str(output), "language": "zh-en",
             "organism": intake.get("organism", "unspecified"),
@@ -129,16 +129,24 @@ def main() -> int:
         },
         "paths": {"results": "Results", "logs": "Scripts/logs", "state": ".workflow"},
         "references": references,
-        "annotation": intake.get("annotation") or {"path": None, "cell_id_column": "cell_id", "cell_type_column": "cell_type"},
+        "annotation": intake.get("annotation") or {
+            "table": None, "profile": None, "review_status": "unreviewed",
+            "cell_id_column": "cell_id", "cell_type_column": "cell_type",
+        },
     }
-    analysis_cfg = {"schema_version": 1, "analysis": merge(DEFAULT_ANALYSIS, intake.get("analysis") or {})}
+    annotation = project_cfg["annotation"]
+    if "path" in annotation and "table" not in annotation:
+        annotation["table"] = annotation["path"]
+    annotation.setdefault("profile", None)
+    annotation.setdefault("review_status", "unreviewed")
+    analysis_cfg = {"schema_version": 2, "analysis": merge(DEFAULT_ANALYSIS, intake.get("analysis") or {})}
     scheduler_cfg = merge({
-        "schema_version": 1, "backend": "local", "account": None,
+        "schema_version": 2, "backend": "local", "account": None,
         "partitions": [], "allow_nodes": [], "exclude_nodes": [],
         "memory_headroom_mb": 4096, "max_parallel": 2,
         "local": {"max_threads": 16, "max_memory": "64G"}, "profiles": DEFAULT_PROFILES,
     }, intake.get("scheduler") or {})
-    scheduler_cfg["schema_version"] = 1
+    scheduler_cfg["schema_version"] = 2
     write_json(output / "config" / "project.yaml", project_cfg)
     write_json(output / "config" / "analysis.yaml", analysis_cfg)
     write_json(output / "config" / "scheduler.yaml", scheduler_cfg)
@@ -158,6 +166,8 @@ def main() -> int:
             writer.writerow({key: row.get(key, "") for key in env_columns})
     (output / "README.md").write_text(bilingual_readme(project_id), encoding="utf-8")
     (output / "Report.md").write_text(bilingual_report(project_id), encoding="utf-8")
+    for directory in (output / "Results" / "runs", output / "Supplementary", output / "Scripts" / "logs"):
+        directory.mkdir(parents=True, exist_ok=True)
     write_json(output / ".workflow" / "template-lock.json", {
         "skill": "single-cell-multiomics-analysis", "skill_version": (SKILL_ROOT / "VERSION").read_text().strip(),
         "skill_git_commit": git_commit(SKILL_ROOT), "schema_version": 1,

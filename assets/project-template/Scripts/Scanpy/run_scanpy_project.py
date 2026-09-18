@@ -25,7 +25,7 @@ def main() -> int:
         raise RuntimeError("no included RNA sample")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     annotation = cfg.get("annotation") or {}
-    profile = annotation.get("profile") or annotation.get("path")
+    profile = annotation.get("profile")
     if profile and not Path(str(profile)).is_absolute():
         profile = str((root / str(profile)).resolve())
     resolved = {

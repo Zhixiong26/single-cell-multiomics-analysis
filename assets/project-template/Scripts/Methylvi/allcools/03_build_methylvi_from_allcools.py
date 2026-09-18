@@ -151,6 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, default=Path(os.environ["SCMO_MVI_ROOT"]) / "count_rows")
     parser.add_argument("--threads", type=int, default=int(os.environ["SCMO_THREADS"]))
     parser.add_argument("--bin-size", type=int, default=int(os.environ["SCMO_BIN_SIZE"]))
+    parser.add_argument("--mc-context", default=os.environ.get("SCMO_MC_CONTEXT", "CGN"))
     return parser.parse_args()
 
 
@@ -171,7 +172,7 @@ def main() -> None:
         "cell_sha256": digest_values(cells),
         "feature_sha256": digest_values(feature_coordinates),
         "obs_sha256": hashlib.sha256(source.obs.to_csv(sep="\t").encode()).hexdigest(),
-        "bin_size": args.bin_size, "context": "CGN",
+        "bin_size": args.bin_size, "context": args.mc_context,
     }
     args.work_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.work_dir / "manifest.json"

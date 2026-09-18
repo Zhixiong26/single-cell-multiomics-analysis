@@ -14,9 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
-PRIMARY_CHROM_RE = re.compile(r"^chr(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--methscan", type=Path, required=True)
@@ -27,6 +24,7 @@ def parse_args():
     parser.add_argument("--expected-cell-ids", type=Path, required=True,
                         help="Filtered column_header.txt")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--chrom-sizes", type=Path, required=True)
     parser.add_argument("--min-cells", type=int, default=6)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--jobs", type=int, default=2,
@@ -62,7 +60,7 @@ def read_metadata(path):
         cell_id = row["cell_id"]
         sample = (row.get("sample_id") or "").strip()
         cell_type = (row.get("rna_cell_type") or "").strip()
-        if not cell_id or not sample or not cell_type or cell_type == "NA":
+        if not cell_id or not sample or not cell_type or cell_type in {"NA", "Unassigned", "requires_review"}:
             continue
         value = (sample, cell_type)
         if cell_id in cells and cells[cell_id] != value:
@@ -79,8 +77,16 @@ def read_filtered_ids(path):
     return ids
 
 
-def build_primary_data_view(source_dir, output_dir):
-    """Create a no-copy hard-link view containing chr1-22/X/Y only."""
+def read_chromosomes(path):
+    with path.open() as handle:
+        values = [line.split("\t", 1)[0].strip() for line in handle if line.strip() and not line.startswith("#")]
+    if not values or len(values) != len(set(values)):
+        raise ValueError("chrom-sizes must contain unique chromosomes")
+    return values
+
+
+def build_primary_data_view(source_dir, output_dir, chromosomes):
+    """Create a no-copy hard-link view for chromosomes declared by chrom-sizes."""
     view = output_dir / "methscan_input_primary"
     if view.is_dir():
         manifest = view / "primary_view.json"
@@ -89,7 +95,7 @@ def build_primary_data_view(source_dir, output_dir):
         recorded = json.loads(manifest.read_text())
         if Path(recorded.get("source_data_dir", "")).resolve() != source_dir.resolve():
             raise ValueError("Existing primary view points to a different source data directory")
-        expected = {"chr%d.npz" % value for value in range(1, 23)} | {"chrX.npz", "chrY.npz"}
+        expected = {chrom + ".npz" for chrom in chromosomes}
         found = {path.name for path in view.glob("*.npz")}
         smooth_found = {path.stem + ".npz" for path in (view / "smoothed").glob("*.csv")}
         if found != expected or smooth_found != expected or not (view / "column_header.txt").is_file():
@@ -107,7 +113,7 @@ def build_primary_data_view(source_dir, output_dir):
         raise FileNotFoundError(source_dir / "column_header.txt")
     for source in sorted(source_dir.glob("*.npz")):
         chrom = source.stem
-        if not PRIMARY_CHROM_RE.fullmatch(chrom):
+        if chrom not in set(chromosomes):
             continue
         smooth_source = source_dir / "smoothed" / (chrom + ".csv")
         if not smooth_source.is_file():
@@ -115,7 +121,7 @@ def build_primary_data_view(source_dir, output_dir):
         os.link(source, view / source.name)
         os.link(smooth_source, smooth_view / smooth_source.name)
         linked.append(source.name)
-    expected = {"chr%d.npz" % value for value in range(1, 23)} | {"chrX.npz", "chrY.npz"}
+    expected = {chrom + ".npz" for chrom in chromosomes}
     found = {name for name in linked if name.endswith(".npz")}
     if found != expected:
         raise ValueError("Primary chromosome set mismatch: missing=%s extra=%s" %
@@ -277,7 +283,8 @@ def main():
         raise FileExistsError("Meth-diff output is not empty: %s" % args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     source_data_dir = args.data_dir.resolve()
-    args.data_dir = build_primary_data_view(source_data_dir, args.output_dir)
+    chromosomes = read_chromosomes(args.chrom_sizes)
+    args.data_dir = build_primary_data_view(source_data_dir, args.output_dir, chromosomes)
 
     metadata = read_metadata(args.cell_metadata)
     filtered_ids = read_filtered_ids(args.expected_cell_ids)
@@ -330,7 +337,7 @@ def main():
         ),
         "data_dir": str(args.data_dir.resolve()),
         "source_data_dir": str(source_data_dir),
-        "chromosome_scope": "chr1-22,X,Y",
+        "chromosome_scope": chromosomes,
         "cell_metadata": str(args.cell_metadata.resolve()),
         "filtered_cells": len(filtered_ids),
         "eligible_cells": sum(len(cells) for types in grouped.values() for cells in types.values()),

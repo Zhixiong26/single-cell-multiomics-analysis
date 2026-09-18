@@ -82,6 +82,24 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
     cfg = load_project(root)
     scheduler = cfg["scheduler"]
     backend = scheduler.get("backend", "local")
+    if backend == "slurm" and not scheduler.get("partitions"):
+        raise WorkflowError("Slurm backend requires a non-empty scheduler.partitions allow-list")
+    if not dry_run:
+        validation_path = root / ".workflow" / "validations" / (current["input_signature"] + ".full.json")
+        full = None
+        if validation_path.is_file():
+            try:
+                candidate = json.loads(validation_path.read_text(encoding="utf-8"))
+                if (candidate.get("status") == "valid" and candidate.get("validation_mode") == "full"
+                        and candidate.get("input_signature") == current["input_signature"]):
+                    full = candidate
+            except (OSError, ValueError):
+                pass
+        if full is None:
+            full = validate(root, mode="full", workers=max(1, int(scheduler.get("validation_workers", 4))))
+            write_json(validation_path, full)
+        if full["status"] != "valid" or full["input_signature"] != current["input_signature"]:
+            raise WorkflowError("matching full input validation is required before production submission")
     if not dry_run:
         commands = cfg["analysis"].get("task_commands") or {}
         missing = [item["id"] for item in plan["tasks"] if not task_is_implemented(item["id"], commands)]

@@ -7,20 +7,11 @@ import csv
 import gzip
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
 
-PRIMARY = re.compile(r"^chr(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
-
-
-def chrom_rank(chrom: str) -> int:
-    value = chrom[3:]
-    return int(value) if value.isdigit() else 23 if value == "X" else 24
-
-
-def read_blacklist(path: Path) -> dict[str, list[tuple[int, int]]]:
+def read_blacklist(path: Path, chromosomes: set[str]) -> dict[str, list[tuple[int, int]]]:
     result: dict[str, list[tuple[int, int]]] = {}
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt") as handle:
@@ -28,7 +19,7 @@ def read_blacklist(path: Path) -> dict[str, list[tuple[int, int]]]:
             if not line.strip() or line.startswith("#"):
                 continue
             chrom, start, end = line.rstrip().split("\t")[:3]
-            if PRIMARY.fullmatch(chrom):
+            if chrom in chromosomes:
                 result.setdefault(chrom, []).append((int(start), int(end)))
     for values in result.values():
         values.sort()
@@ -51,6 +42,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pairwise-summary", type=Path, required=True)
     parser.add_argument("--blacklist", type=Path, required=True)
+    parser.add_argument("--chrom-sizes", type=Path, required=True)
     parser.add_argument("--blacklist-fraction", type=float, default=0.2)
     parser.add_argument("--raw-p", type=float, default=0.01)
     parser.add_argument("--min-abs-diff", type=float, default=0.25)
@@ -60,7 +52,12 @@ def main() -> None:
     if not 0 < args.raw_p <= 1 or not 0 <= args.min_abs_diff <= 1:
         raise ValueError("Invalid raw-p or methylation-difference cutoff")
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    blacklist = read_blacklist(args.blacklist)
+    with args.chrom_sizes.open() as handle:
+        chromosome_order = [line.split("\t", 1)[0].strip() for line in handle if line.strip() and not line.startswith("#")]
+    if not chromosome_order or len(chromosome_order) != len(set(chromosome_order)):
+        raise ValueError("chrom-sizes must contain unique chromosomes")
+    ranks = {chrom: index for index, chrom in enumerate(chromosome_order)}
+    blacklist = read_blacklist(args.blacklist, set(ranks))
     with args.pairwise_summary.open(newline="") as handle:
         comparisons = list(csv.DictReader(handle, delimiter="\t"))
     if not comparisons or any(row["status"] != "complete" for row in comparisons):
@@ -83,7 +80,7 @@ def main() -> None:
                     if len(fields) != 12:
                         raise ValueError(f"{path}:{line_number}: expected 12 fields")
                     chrom, start, end = fields[0], int(fields[1]), int(fields[2])
-                    if not PRIMARY.fullmatch(chrom):
+                    if chrom not in ranks:
                         continue
                     meth_a, meth_b, raw_p = float(fields[7]), float(fields[8]), float(fields[10])
                     abs_diff = abs(meth_a - meth_b)
@@ -99,7 +96,7 @@ def main() -> None:
                     else:
                         raise ValueError(f"{path}:{line_number}: invalid low group {fields[9]!r}")
                     out.write(
-                        f"{chrom_rank(chrom)}\t{chrom}\t{start}\t{end}\t{hypo}\t"
+                        f"{ranks[chrom]}\t{chrom}\t{start}\t{end}\t{hypo}\t"
                         f"{abs_diff:.17g}\t{raw_p:.17g}\t{comparison['comparison']}\n"
                     )
                     qualifying_rows += 1
