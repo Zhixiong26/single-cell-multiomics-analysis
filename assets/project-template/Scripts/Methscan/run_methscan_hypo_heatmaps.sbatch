@@ -11,6 +11,7 @@ output_dir=$1
 [[ -f "$output_dir/methdiff.COMPLETE" ]] || { echo "Meth-diff stage is not complete" >&2; exit 3; }
 "$scanpy_python" "$script_dir/08_hypo_dmr_heatmaps.py" \
   --run-dir "$output_dir" --methscan "$methscan_exe" --methscan-python "$methscan_python" \
+  --chrom-sizes "$SCMO_CHROM_SIZES" \
   --raw-p "$hypo_raw_p" --min-abs-diff "$hypo_min_abs_diff" \
   --top-per-cell-type "$hypo_top_per_cell_type" --min-cells "$methdiff_min_cells" \
   --threads "$methdiff_threads" --bandwidth "$methdiff_bandwidth" \

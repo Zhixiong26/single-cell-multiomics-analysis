@@ -71,7 +71,10 @@ class SkillTests(unittest.TestCase):
                 "stage": stage, "python": sys.executable,
                 "executable": sys.executable, "version_command": sys.executable + " --version", "required": 1,
             } for stage in ("orchestrator", "scanpy_allcools", "methscan", "methylvi")],
-            "analysis": {"task_commands": {"scanpy": ["/bin/true"]}},
+            "analysis": {"task_commands": {"scanpy": [
+                "/bin/sh", "-c",
+                "touch {task_dir}/artifact; printf '%s\\n' '{{\"artifacts\":[\"{task_dir}/artifact\"]}}' > {task_dir}/task_outputs.json",
+            ]}},
             "scheduler": {"backend": "local", "local": {"max_threads": 64, "max_memory": "256G"}},
         }
         intake_path = root / "intake.yaml"

@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 project=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
-root="$project/Results/MethylVI_vmr_plus_all_unique_pooled_DMR"
+root="${SCMO_RESULT_DIR:?set SCMO_RESULT_DIR}/methylvi/vmr_dmr"
 bed="$root/shared/dmr/all_unique_hypo_DMRs.merged.bed"
 input="$root/shared/dmr/all_unique_hypo_DMRs.input.h5mu"
 work="$root/shared/dmr/count_rows"

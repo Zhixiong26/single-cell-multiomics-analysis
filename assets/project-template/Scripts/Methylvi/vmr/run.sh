@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -n "${SCMO_MANAGED_RUN_ID:-}" ]] || { echo "Use workflow.py plan/submit; direct run.sh execution is disabled" >&2; exit 2; }
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$here/00_vmr_methylvi_config.sh"
@@ -19,16 +20,8 @@ require_file() {
 
 verify() {
   if [[ -n "$VMR_INPUT_MANIFEST" ]]; then
-    summary="$VMR_METHSCAN_RUN_DIR/run_summary.json"
-    require_file "$summary"
+    require_file "$VMR_METHSCAN_RUN_DIR/smooth.COMPLETE"
     require_file "$VMR_FILTERED_CELL_IDS"
-    "$python_exe" - "$summary" <<'PY'
-import json, sys
-with open(sys.argv[1]) as handle:
-    data = json.load(handle)
-if data.get("status") != "complete":
-    raise SystemExit(f"ERROR: MethSCAn run is not complete: {sys.argv[1]}")
-PY
   fi
   [[ -n "$VMR_SOURCE_BED" && -s "$VMR_SOURCE_BED" ]] || {
     echo "ERROR: MethSCAn VMR BED is not ready: $VMR_SOURCE_BED" >&2

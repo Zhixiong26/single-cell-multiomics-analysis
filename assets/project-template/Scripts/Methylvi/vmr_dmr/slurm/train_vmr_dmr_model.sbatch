@@ -3,10 +3,8 @@
 
 set -Eeuo pipefail
 if (( $# != 2 )); then echo "Usage: $0 0.01|0.02|0.05 10000|30000" >&2; exit 2; fi
-case "$1" in 0.01|0.02|0.05) ;; *) exit 3;; esac
-case "$2" in 10000|30000) ;; *) exit 4;; esac
 project=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
-route="$project/Results/MethylVI_vmr_plus_all_unique_pooled_DMR/vmr_dmr/var_${1}/features_${2}"
+route="${SCMO_RESULT_DIR:?set SCMO_RESULT_DIR}/methylvi/vmr_dmr/var_${1}/features_${2}"
 input="$route/input.h5mu"; results="$route/results"
 [[ -f "$route/input.COMPLETE" && -s "$input" ]] || exit 5
 export SCMO_MVI_INPUT="$input" SCMO_MVI_RESULTS="$results" VMR_MVI_RESULTS="$results"

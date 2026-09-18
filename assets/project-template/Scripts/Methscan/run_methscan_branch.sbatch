@@ -9,8 +9,8 @@ source "$script_dir/00_methscan_config.sh"
 if (( $# != 2 )); then echo "Usage: sbatch $0 OUTPUT_DIR THRESHOLD" >&2; exit 2; fi
 output_dir=$1
 threshold=$2
-case "$output_dir" in "$project_dir/Results/Methscan/"*) ;; *) echo "OUTPUT_DIR must be under $project_dir/Results/Methscan/" >&2; exit 3;; esac
-case "$threshold" in 0.01|0.02|0.05) ;; *) echo "THRESHOLD must be one of: ${scan_var_thresholds[*]}" >&2; exit 4;; esac
+[[ "$(readlink -m "$output_dir")" == "$(readlink -m "${SCMO_METHSCAN_RUN_DIR:?set SCMO_METHSCAN_RUN_DIR}")" ]] || { echo "Unexpected MethSCAn output root" >&2; exit 3; }
+[[ " ${scan_var_thresholds[*]} " == *" $threshold "* ]] || { echo "Unsupported threshold: $threshold" >&2; exit 4; }
 [[ -f "$output_dir/smooth.COMPLETE" ]] || { echo "Smooth stage is not complete: $output_dir" >&2; exit 5; }
 [[ -r "$output_dir/03_filtered/column_header.txt" ]] || { echo "Filtered input is missing" >&2; exit 6; }
 [[ -x "$methscan_exe" && -x "$scanpy_python" ]] || { echo "Configured executable missing" >&2; exit 7; }

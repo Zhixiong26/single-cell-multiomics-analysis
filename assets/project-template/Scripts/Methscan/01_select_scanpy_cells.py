@@ -13,7 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples-tsv", type=Path)
     parser.add_argument("--allc-source", type=Path)
-    parser.add_argument("--scanpy-annotation", type=Path, required=True)
+    parser.add_argument("--scanpy-annotation", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sample", action="append", dest="samples")
     parser.add_argument("--exclude-cell-type", default="NA")
@@ -70,8 +70,6 @@ def discover_allcs(sample_rows):
 
 def main():
     args = parse_args()
-    if not args.annotation_approved:
-        raise ValueError("MethSCAn cell-type routes require approved annotation")
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError("Scanpy selection output is not empty: %s" % args.output_dir)
 
@@ -96,9 +94,9 @@ def main():
             "No ALLC files found for required sample(s): %s" % ", ".join(missing_samples)
         )
 
-    annotation_rows = read_tsv(args.scanpy_annotation)
+    annotation_rows = read_tsv(args.scanpy_annotation) if args.scanpy_annotation else []
     required = {"cell_id", "cell_type"}
-    if not annotation_rows or not required.issubset(annotation_rows[0]):
+    if annotation_rows and not required.issubset(annotation_rows[0]):
         raise ValueError("Scanpy annotation must contain cell_id and cell_type")
     if len({row["cell_id"] for row in annotation_rows}) != len(annotation_rows):
         raise ValueError("Scanpy annotation cell_id values must be unique")
@@ -107,6 +105,8 @@ def main():
     selected, excluded = [], []
     for row in allc_rows:
         annotation_row = annotation.get(row["cell_id"])
+        if not args.annotation_approved:
+            annotation_row = {"cell_id": row["cell_id"], "cell_type": "Unassigned"}
         if annotation_row is None:
             excluded.append({
                 "cell_id": row["cell_id"],
@@ -119,7 +119,7 @@ def main():
         cell_type = (annotation_row.get("cell_type") or "").strip()
         if not cell_type:
             reason = "missing_scanpy_cell_type"
-        elif cell_type in {args.exclude_cell_type, "NA", "Unassigned", "requires_review"}:
+        elif args.annotation_approved and cell_type in {args.exclude_cell_type, "NA", "Unassigned", "requires_review"}:
             reason = "excluded_scanpy_cell_type_%s" % args.exclude_cell_type
         else:
             reason = None

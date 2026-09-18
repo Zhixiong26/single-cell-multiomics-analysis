@@ -116,7 +116,7 @@ def main() -> None:
     requested_components = int(os.environ["SCMO_LSI_COMPONENTS"])
     # scipy.sparse.linalg.svds (used by ARPACK) requires
     # 0 < k < min(matrix.shape). Keep the full-run value at 100 while making
-    # small smoke datasets valid.
+    # small bounded validation datasets valid.
     lsi_components = min(requested_components, adata.n_obs - 1, adata.n_vars - 1)
     if lsi_components < 1:
         raise ValueError(

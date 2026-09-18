@@ -33,6 +33,21 @@ def validate_outputs(item, variables):
     return rendered
 
 
+def recorded_outputs_exist(values):
+    for value in values:
+        path = Path(value)
+        if not path.exists():
+            return False
+        if path.name == "task_outputs.json":
+            try:
+                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
+            except (OSError, ValueError, TypeError):
+                return False
+            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
+                return False
+    return True
+
+
 def summarize_workflow(plan, run_dir):
     summary_task = next(item for item in plan["tasks"] if item["id"] == "workflow_summary")
     failures = []
@@ -44,7 +59,8 @@ def summarize_workflow(plan, run_dir):
             failures.append("%s lacks completion evidence" % dependency)
             continue
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        if status.get("status") != "complete" or status.get("input_signature") != plan.get("input_signature"):
+        if (status.get("status") != "complete" or status.get("input_signature") != plan.get("input_signature")
+                or not recorded_outputs_exist(status.get("outputs", []))):
             failures.append("%s has invalid status or input signature" % dependency)
     if failures:
         raise WorkflowError("workflow summary failed: %s" % "; ".join(failures))
@@ -76,9 +92,9 @@ def main() -> int:
                 command = value
                 break
     if command is None and not internal_summary:
-        raise WorkflowError(
-            "analysis.task_commands does not define %s; generate/adapt the task command before execution" % args.task
-        )
+        command = [sys.executable, str(root / "Scripts" / "Common" / "task_adapter.py"),
+                   "--project", str(root), "--run-id", args.run_id, "--task", args.task,
+                   "--task-dir", str(run_dir / "tasks" / args.task)]
     task_dir = run_dir / "tasks" / args.task
     task_dir.mkdir(parents=True, exist_ok=True)
     variables = {

@@ -6,6 +6,7 @@
 set -Eeuo pipefail
 project=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
 root=${SCMO_MVI_EXPERIMENT_ROOT:?set SCMO_MVI_EXPERIMENT_ROOT}
+source "$project/Scripts/Methylvi/00_experiment_config.sh"
 python_exe=${SCMO_METHYLVI_ENV:?set SCMO_METHYLVI_ENV}/bin/python
 export SCMO_BATCH_KEY=sample_id SCMO_CELLTYPE_KEY=cell_type SCMO_SEED=0
 export SCMO_THREADS=45 SCMO_SUPERVISED_TARGET_KEY=cell_type
@@ -13,8 +14,8 @@ export SCMO_SUPERVISED_TARGET_WEIGHTS="0.2 0.5 0.7 0.9"
 export SCMO_SUPERVISED_NEIGHBORS=15 SCMO_SUPERVISED_MIN_DIST=0.5 MPLBACKEND=Agg
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-for version in 0.01 0.02 0.05; do
-  for features in 10000 30000; do
+for version in $MVI_VMR_THRESHOLDS; do
+  for features in $MVI_FEATURE_TARGETS; do
     route="$root/vmr/var_${version}/features_${features}"
     input="$route/input.h5mu"
     results="$route/results"
@@ -31,4 +32,4 @@ for version in 0.01 0.02 0.05; do
     touch "$route/model.COMPLETE"
   done
 done
-printf 'Recovered all six VMR post-training outputs under %s\n' "$root"
+printf 'Recovered configured VMR post-training outputs under %s\n' "$root"

@@ -3,11 +3,9 @@
 
 set -Eeuo pipefail
 if (( $# != 2 )); then echo "Usage: $0 0.01|0.02|0.05 10000|30000" >&2; exit 2; fi
-case "$1" in 0.01|0.02|0.05) ;; *) exit 3;; esac
-case "$2" in 10000|30000) ;; *) exit 4;; esac
 project=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
-old="${SCMO_BASE_VMR_INPUT_ROOT:?set SCMO_BASE_VMR_INPUT_ROOT}/var_${1}/features_${2}/input.h5mu"
-root="$project/Results/MethylVI_vmr_plus_all_unique_pooled_DMR"
+old="${SCMO_BASE_VMR_INPUT_ROOT:-${SCMO_RESULT_DIR:?}/methylvi/vmr}/var_${1}/features_${2}/input.h5mu"
+root="$SCMO_RESULT_DIR/methylvi/vmr_dmr"
 dmr="$root/shared/dmr/all_unique_hypo_DMRs.input.h5mu"
 out="$root/vmr_dmr/var_${1}/features_${2}/input.h5mu"
 [[ -f "$root/shared/dmr/counts.COMPLETE" ]] || exit 5

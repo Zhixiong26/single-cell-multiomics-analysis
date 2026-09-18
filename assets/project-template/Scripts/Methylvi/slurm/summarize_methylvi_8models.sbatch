@@ -16,13 +16,13 @@ check_model() {
   [[ -s "$route/results/qc/methylation_qc_summary.json" ]]
   printf '%s\t%s\t%s\tcomplete\t%s\n' "$method" "$version" "$features" "$route/results" >> "$summary"
 }
-for features in 10000 30000; do
+for features in $MVI_FEATURE_TARGETS; do
   check_model allcools 5kb "$features" "$MVI_EXPERIMENT_ROOT/allcools/features_${features}"
 done
-for threshold in 0.01 0.02 0.05; do
-  for features in 10000 30000; do
+for threshold in $MVI_VMR_THRESHOLDS; do
+  for features in $MVI_FEATURE_TARGETS; do
     check_model vmr "$threshold" "$features" "$MVI_EXPERIMENT_ROOT/vmr/var_${threshold}/features_${features}"
   done
 done
 touch "$MVI_EXPERIMENT_ROOT/workflow.COMPLETE"
-printf 'Verified eight MethylVI models: %s\n' "$MVI_EXPERIMENT_ROOT"
+printf 'Verified configured MethylVI models: %s\n' "$MVI_EXPERIMENT_ROOT"

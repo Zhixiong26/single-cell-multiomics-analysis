@@ -39,9 +39,7 @@ DEFAULT_ANALYSIS = {
         "seed": 0, "validation_fraction": 0.1,
         "supervised_umap_weights": [0.2, 0.5, 0.7, 0.9],
     },
-    "task_commands": {
-        "scanpy": ["{python}", "{project}/Scripts/Scanpy/run_scanpy_project.py", "--project", "{project}", "--output-dir", "{task_dir}"]
-    },
+    "task_commands": {},
 }
 
 DEFAULT_PROFILES = {

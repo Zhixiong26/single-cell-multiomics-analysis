@@ -17,6 +17,8 @@ from validate_project import validate
 def task(name: str, profile: str, dependencies: List[str] | None = None,
          parameters: Dict[str, Any] | None = None, environment: str = "orchestrator",
          outputs: List[str] | None = None) -> dict:
+    if outputs is None and name != "workflow_summary":
+        outputs = ["{task_dir}/task_outputs.json"]
     return {
         "id": name, "profile": profile, "dependencies": dependencies or [],
         "parameters": parameters or {}, "environment": environment,
@@ -28,7 +30,7 @@ ROUTE_PREREQUISITES = {
     "methscan_dmr": {"methscan_vmr"},
     "methylvi_allcools": {"allcools"},
     "methylvi_vmr": {"methscan_vmr"},
-    "methylvi_vmr_dmr": {"methscan_vmr", "methscan_dmr"},
+    "methylvi_vmr_dmr": {"methscan_vmr", "methscan_dmr", "methylvi_vmr"},
 }
 
 
@@ -105,17 +107,21 @@ def make_tasks(routes: Dict[str, bool], analysis: Dict[str, Any]) -> List[dict]:
         thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
         for threshold in thresholds:
             vmr_task = "methscan_vmr_%s" % threshold
+            feature_task = "methylvi_vmr_features_%s" % threshold
+            tasks.append(task(feature_task, "feature_builder", [vmr_task], {"threshold": threshold}, "methylvi"))
             for count in feature_targets:
-                tasks.append(task("methylvi_vmr_%s_%s" % (threshold, count), "trainer", [vmr_task], {"threshold": threshold, "features": count}, "methylvi"))
+                tasks.append(task("methylvi_vmr_%s_%s" % (threshold, count), "trainer", [feature_task], {"threshold": threshold, "features": count}, "methylvi"))
     if routes.get("methylvi_vmr_dmr") and methscan_tail:
         tasks.append(task("pooled_dmr_prepare", "dmr_prepare", ["methscan_pooled_dmr"], environment="methylvi"))
-        tasks.append(task("pooled_dmr_counts", "feature_builder", ["pooled_dmr_prepare"], environment="methylvi"))
+        first_threshold = analysis.get("methscan", {}).get("vmr_thresholds", [0.01])[0]
+        tasks.append(task("pooled_dmr_counts", "feature_builder", ["pooled_dmr_prepare", "methylvi_vmr_features_%s" % first_threshold], environment="methylvi"))
         previous = "pooled_dmr_counts"
         thresholds = analysis.get("methscan", {}).get("vmr_thresholds", [0.01, 0.02, 0.05])
         for threshold in thresholds:
             for count in feature_targets:
                 name = "methylvi_vmr_dmr_%s_%s" % (threshold, count)
-                tasks.append(task(name, "trainer", [previous, "methscan_vmr_%s" % threshold], {"threshold": threshold, "features": count}, "methylvi"))
+                base_features = "methylvi_vmr_features_%s" % threshold
+                tasks.append(task(name, "trainer", [previous, base_features], {"threshold": threshold, "features": count}, "methylvi"))
                 previous = name
     if tasks:
         terminal = {item["id"] for item in tasks}

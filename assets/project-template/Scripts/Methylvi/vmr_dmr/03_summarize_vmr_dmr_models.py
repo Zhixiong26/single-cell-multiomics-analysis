@@ -22,7 +22,7 @@ def main() -> None:
     models = []
     for threshold in args.threshold:
         for base_features in args.feature_target:
-            route = args.root / "vmr_dmr" / f"var_{threshold}" / f"features_{base_features}"
+            route = args.root / f"var_{threshold}" / f"features_{base_features}"
             input_summary = json.loads((route / "input.summary.json").read_text())
             run_summary = json.loads((route / "results/run_summary.json").read_text())
             required = [

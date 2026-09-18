@@ -14,6 +14,7 @@ run_dir="$output_dir/07_methdiff"
   --methscan "$methscan_exe" --data-dir "$output_dir/03_filtered" \
   --cell-metadata "$output_dir/00_scanpy_selected/input_manifest.tsv" \
   --expected-cell-ids "$output_dir/03_filtered/column_header.txt" \
+  --chrom-sizes "$SCMO_CHROM_SIZES" \
   --output-dir "$run_dir" --min-cells "$methdiff_min_cells" \
   --threads "$methdiff_threads" --jobs "$methdiff_jobs" \
   --bandwidth "$methdiff_bandwidth" --stepsize "$methdiff_stepsize" \

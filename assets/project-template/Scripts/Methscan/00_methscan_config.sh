@@ -5,10 +5,10 @@ project_dir=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
 methscan_exe=${SCMO_METHSCAN_EXE:?set SCMO_METHSCAN_EXE}
 methscan_python=${SCMO_METHSCAN_PYTHON:?set SCMO_METHSCAN_PYTHON}
 scanpy_python=${SCMO_SCANPY_PYTHON:?set SCMO_SCANPY_PYTHON}
-rna_annotation_table=${SCMO_ANNOTATION:?set SCMO_ANNOTATION}
+rna_annotation_table=${SCMO_ANNOTATION:-}
 rna_exclude_cell_type=${SCMO_EXCLUDE_CELL_TYPE:-NA}
-allc_source=${SCMO_ALLC_SOURCE:?set SCMO_ALLC_SOURCE}
-read -r -a samples <<< "${SCMO_SAMPLE_IDS:?set space-separated SCMO_SAMPLE_IDS}"
+allc_source=${SCMO_ALLC_SOURCE:-}
+read -r -a samples <<< "${SCMO_SAMPLE_IDS:-}"
 
 min_sites=${SCMO_MIN_SITES:-300000}
 min_meth=${SCMO_MIN_METH_PERCENT:-50}

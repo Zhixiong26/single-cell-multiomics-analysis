@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Unified .cov -> ALLCools -> MethylVI entry point.
 set -euo pipefail
+[[ -n "${SCMO_MANAGED_RUN_ID:-}" ]] || { echo "Use workflow.py plan/submit; direct run.sh execution is disabled" >&2; exit 2; }
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$here/00_methylvi_config.sh"
@@ -126,20 +127,6 @@ plots_after_methylvi() {
   "$mvi_python" "$here/07_plot_methylvi_umap.py"
 }
 
-configure_smoke() {
-  export SCMO_MVI_ROOT="$SCMO_PROJECT_DIR/Results/MethylVI_30wcov_allcools/smoke"
-  export SCMO_ALLCOOLS_ROOT="$SCMO_MVI_ROOT/allcools_5kb"
-  export SCMO_ALLC_DIR="$SCMO_ALLCOOLS_ROOT/input_allc"
-  export SCMO_ALLC_TABLE="$SCMO_ALLCOOLS_ROOT/selected_cells.allc.tsv"
-  export SCMO_MCDS="$SCMO_ALLCOOLS_ROOT/mcg_5kb.mcds"
-  export SCMO_ALLCOOLS_H5AD="$SCMO_ALLCOOLS_ROOT/mcg_5kb.clustered.h5ad"
-  export SCMO_MVI_INPUT="$SCMO_MVI_ROOT/multiome_allcools_5kb_methylvi_input.h5mu"
-  export SCMO_MVI_RESULTS="$SCMO_MVI_ROOT/results"
-  export SCMO_MAX_CELLS="${SCMO_SMOKE_CELLS:-100}"
-  export SCMO_BALANCED_COHORTS=1
-  export SCMO_EPOCHS="${SCMO_SMOKE_EPOCHS:-2}"
-}
-
 case "$stage" in
   verify) verify ;;
   prepare) verify; prepare_allc; generate_mcds ;;
@@ -151,6 +138,5 @@ case "$stage" in
   plots-after) plots_after_methylvi ;;
   supervised) supervised_umap ;;
   all) verify; run_allcools; build_methylvi; train_methylvi; supervised_umap ;;
-  smoke) configure_smoke; verify; run_allcools; build_methylvi; train_methylvi ;;
-  *) echo "Usage: bash $0 {verify|prepare|cluster|allcools|build|train|plots-before|plots-after|supervised|smoke|all}" >&2; exit 2 ;;
+  *) echo "Usage: bash $0 {verify|prepare|cluster|allcools|build|train|plots-before|plots-after|supervised|all}" >&2; exit 2 ;;
 esac

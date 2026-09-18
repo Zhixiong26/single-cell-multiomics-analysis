@@ -17,6 +17,21 @@ TERMINAL_OK = {"COMPLETED", "complete"}
 TERMINAL_BAD = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "failed"}
 
 
+def recorded_outputs_exist(values: list[str]) -> bool:
+    for value in values:
+        path = Path(value)
+        if not path.exists():
+            return False
+        if path.name == "task_outputs.json":
+            try:
+                artifacts = json.loads(path.read_text(encoding="utf-8")).get("artifacts", [])
+            except (OSError, ValueError, TypeError):
+                return False
+            if not artifacts or not all(Path(artifact).exists() for artifact in artifacts):
+                return False
+    return True
+
+
 def sacct_usage(job_ids: list[str]) -> dict[str, dict]:
     numeric = [value for value in job_ids if value.isdigit()]
     if not numeric:
@@ -79,7 +94,7 @@ def inspect(project: Path, run_id: str) -> dict:
                     and status_record.get("input_signature") == plan.get("input_signature")
                     and status_record.get("code_signature") == plan.get("code_signature")
                     and status_record.get("task_signature") == expected_signature
-                    and all(Path(value).exists() for value in status_record.get("outputs", []))
+                    and recorded_outputs_exist(status_record.get("outputs", []))
                 )
                 if not evidence_valid:
                     reason = "completion evidence or signature mismatch"

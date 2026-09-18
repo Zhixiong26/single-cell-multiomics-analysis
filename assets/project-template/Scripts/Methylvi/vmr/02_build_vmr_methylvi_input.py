@@ -129,7 +129,7 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=int(os.environ["VMR_THREADS"]))
     parser.add_argument("--min-covered-percent", type=float, default=float(os.environ["VMR_MIN_COVERED_PERCENT"]))
     parser.add_argument("--target-features", type=int, default=int(os.environ["VMR_TARGET_FEATURES"]))
-    parser.add_argument("--max-cells", type=int, default=0, help="Use only the first N cells for a smoke test")
+    parser.add_argument("--max-cells", type=int, default=0, help="Optional bounded validation subset")
     parser.add_argument("--mc-context", default=os.environ.get("VMR_MC_CONTEXT", os.environ.get("SCMO_MC_CONTEXT", "CGN")))
     args = parser.parse_args()
     if args.threads < 1 or not 0 <= args.min_covered_percent <= 100 or args.max_cells < 0 or args.target_features < 2:
