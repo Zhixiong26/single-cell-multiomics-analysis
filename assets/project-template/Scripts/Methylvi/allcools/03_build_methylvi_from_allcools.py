@@ -21,6 +21,7 @@ import pandas as pd
 _LOOKUP: dict[str, dict[int, tuple[int, int, int]]] | None = None
 _N_FEATURES = 0
 _BIN_SIZE = 5000
+_MC_PREFIX = "CG"
 
 
 def region_table(var: pd.DataFrame, bin_size: int) -> pd.DataFrame:
@@ -70,9 +71,10 @@ def make_lookup(regions: pd.DataFrame) -> dict[str, dict[int, tuple[int, int, in
     return lookup
 
 
-def init_worker(lookup: dict[str, dict[int, tuple[int, int, int]]], n_features: int, bin_size: int) -> None:
-    global _LOOKUP, _N_FEATURES, _BIN_SIZE
-    _LOOKUP, _N_FEATURES, _BIN_SIZE = lookup, n_features, bin_size
+def init_worker(lookup: dict[str, dict[int, tuple[int, int, int]]], n_features: int, bin_size: int,
+                mc_prefix: str) -> None:
+    global _LOOKUP, _N_FEATURES, _BIN_SIZE, _MC_PREFIX
+    _LOOKUP, _N_FEATURES, _BIN_SIZE, _MC_PREFIX = lookup, n_features, bin_size, mc_prefix
 
 
 def checkpoint_valid(path: Path, expected_cell: str) -> bool:
@@ -104,7 +106,7 @@ def build_row(task: tuple[int, str, str, str]) -> dict[str, object]:
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 6:
                 raise ValueError(f"{allc_string}:{line_number}: expected >=6 columns")
-            if not fields[3].upper().startswith("CG"):
+            if not fields[3].upper().startswith(_MC_PREFIX):
                 continue
             try:
                 position0, methylated, coverage = int(fields[1]) - 1, int(fields[4]), int(fields[5])
@@ -157,6 +159,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # The ALLC context column holds the dinucleotide plus an optional third letter (CGN, CHN, CGH).
+    # Compare on the dinucleotide so a configured non-CG context selects its own records: a hardcoded
+    # "CG" test would retain nothing under CHN and quietly emit an all-zero matrix.
+    mc_prefix = str(args.mc_context).strip().upper()[:2]
+    if len(mc_prefix) != 2 or not mc_prefix.isalpha() or not mc_prefix.startswith("C"):
+        raise ValueError("mc-context must name a cytosine context such as CGN or CHN: %r" % args.mc_context)
     if args.threads < 1 or args.bin_size < 1:
         raise ValueError("threads and bin-size must be positive")
     source = ad.read_h5ad(args.h5ad, backed="r")
@@ -224,7 +232,7 @@ def main() -> None:
     built = reused = 0
     with cf.ProcessPoolExecutor(
         max_workers=args.threads, initializer=init_worker,
-        initargs=(lookup, len(regions), args.bin_size),
+        initargs=(lookup, len(regions), args.bin_size, mc_prefix),
     ) as executor:
         for completed, result in enumerate(executor.map(build_row, tasks), start=1):
             built += result["status"] == "built"

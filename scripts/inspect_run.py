@@ -10,14 +10,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import WorkflowError, signature, validate_recorded_outputs, write_json
+from _common import (
+    TERMINAL_BAD_STATES, WorkflowError, refresh_run_log, signature,
+    validate_recorded_outputs, write_json,
+)
 
 
 TERMINAL_OK = {"COMPLETED", "complete"}
-TERMINAL_BAD = {
-    "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
-    "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT", "failed",
-}
+# Aliased from the shared set: the run's status verdict and the "failed" count in
+# the Report record are computed from the same states, so they cannot disagree.
+TERMINAL_BAD = TERMINAL_BAD_STATES
 
 
 def sacct_usage(job_ids: list[str]) -> dict[str, dict]:
@@ -117,7 +119,34 @@ def inspect(project: Path, run_id: str) -> dict:
         marker = run_dir / "workflow.COMPLETE"
         if marker.exists():
             marker.unlink()
+    # Deliberately after both of the above: the record points at run_summary.json
+    # and the refresh rescans every run, so this run's summary has to be on disk
+    # first, and the document must never claim more than the machine state does.
+    _refresh_docs(Path(project).resolve())
     return result
+
+
+def _refresh_docs(project: Path) -> None:
+    """Record this run in the root Report.md, best effort.
+
+    The exit code encodes the state of the run, not of a derived document: a
+    read-only checkout or a full disk must not turn a validated run into a
+    reported failure. update_report.py is the loud path, and it does exit
+    non-zero when the document cannot be written, so a failure is never silent
+    to someone who wants it to be fatal.
+    """
+    try:
+        outcome = refresh_run_log(project)
+    except (WorkflowError, OSError, ValueError) as exc:
+        print(
+            "WARNING: could not update %s: %s\n"
+            "         recover with: python tools/update_report.py --project %s"
+            % (project / "Report.md", exc, project),
+            file=sys.stderr,
+        )
+        return
+    for warning in outcome.get("warnings") or []:
+        print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
 
 
 def main() -> int:

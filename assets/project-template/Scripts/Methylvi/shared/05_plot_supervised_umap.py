@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import anndata as ad
@@ -25,14 +26,30 @@ def tag(weight: float) -> str:
     return f"{weight:g}".replace(".", "p")
 
 
+# Placeholders the pipeline writes when a cluster has no cell type yet. The Scanpy selection and
+# the meth-diff stage already treat this same set as "not a cell type"
+# (Scripts/Methscan/01_select_scanpy_cells.py, 07_methdiff_celltype.py); a supervised UMAP must
+# agree, otherwise an unreviewed run supervises on the literal string "Unassigned". The canonical
+# superset lives in Scripts/Common/annotation.py; this stage keeps its own copy because it runs
+# standalone in the MethylVI environment without importing the shared tooling.
+PLACEHOLDER_LABELS = frozenset({"", "na", "nan", "none", "n/a", "unknown", "unannotated",
+                                "unassigned", "requires_review", "requires review"})
+
+
 def target_codes(obs: pd.DataFrame, target_key: str) -> tuple[np.ndarray, dict[str, int]]:
+    """Encode real cell types as non-negative codes and leave placeholders at -1.
+
+    Returning an empty mapping when fewer than two real labels exist is deliberate: that is a
+    property of the data, not a failure of this stage, and the caller handles it by skipping the
+    figures. Raising here would discard a successfully trained model.
+    """
     if target_key not in obs:
         raise KeyError(f"Embedding lacks supervised target column: {target_key}")
     labels = obs[target_key].astype("string").fillna("Unknown").str.strip()
-    unknown = labels.str.lower().isin({"", "unknown", "unannotated", "na", "nan"}).to_numpy()
+    unknown = labels.str.lower().isin(PLACEHOLDER_LABELS).to_numpy()
     categories = sorted(labels.loc[~unknown].unique())
     if len(categories) < 2:
-        raise ValueError("At least two known cell-type labels are required")
+        return np.full(len(labels), -1, dtype=np.int32), {}
     mapping = {label: index for index, label in enumerate(categories)}
     codes = np.full(len(labels), -1, dtype=np.int32)
     for label, code in mapping.items():
@@ -62,6 +79,26 @@ def main() -> None:
     if latent.ndim != 2 or latent.shape[0] != embedding.n_obs or not np.isfinite(latent).all():
         raise ValueError("Invalid X_methylVI latent representation")
     labels, label_map = target_codes(embedding.obs, args.target_key)
+    if len(label_map) < 2:
+        reason = ("%s carries fewer than two real cell-type labels (placeholders such as Unassigned "
+                  "or requires_review are not cell types)" % args.target_key)
+        # A summary is written even when there is nothing to plot. The wrapper that checks this
+        # stage's completeness and the run's evidence both read this file, so it has to say that the
+        # skip was deliberate -- absence of files cannot distinguish that from a crashed stage.
+        args.output.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "status": "skipped", "reason": reason, "source_representation": "X_methylVI",
+            "target_key": args.target_key, "cells": embedding.n_obs,
+            "target_weights": args.weights, "target_mapping": {},
+            "coordinate_files": {}, "figure_files": [],
+        }
+        (args.output / "supervised_umap_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(
+            "supervised UMAP skipped: %s. The trained embedding is unaffected; annotate the "
+            "clusters and re-run this stage for the figures." % reason,
+            file=sys.stderr, flush=True,
+        )
+        return
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     color_keys = [key for key in (args.target_key, os.environ["SCMO_BATCH_KEY"], "L1", "methylVI_leiden") if key in embedding.obs]
@@ -111,7 +148,7 @@ def main() -> None:
     }
     embedding_path = output / "methylvi_supervised_umap.h5ad"
     embedding.write_h5ad(embedding_path, compression="gzip")
-    summary = {**embedding.uns["supervised_umap"], "target_mapping": label_map,
+    summary = {**embedding.uns["supervised_umap"], "status": "complete", "target_mapping": label_map,
                "cells": embedding.n_obs, "embedding_h5ad": str(embedding_path),
                "coordinate_files": coordinate_files, "figure_files": figure_files}
     (output / "supervised_umap_summary.json").write_text(json.dumps(summary, indent=2) + "\n")

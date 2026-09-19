@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Portable defaults. Project-specific paths are injected by the generated task command.
+# Shared defaults for the MethSCAn workflow. Paths, samples and executables are
+# injected by the generated task command; export the variable to override.
 
 project_dir=${SCMO_PROJECT_ROOT:?set SCMO_PROJECT_ROOT}
 methscan_exe=${SCMO_METHSCAN_EXE:?set SCMO_METHSCAN_EXE}
@@ -7,9 +8,14 @@ methscan_python=${SCMO_METHSCAN_PYTHON:?set SCMO_METHSCAN_PYTHON}
 scanpy_python=${SCMO_SCANPY_PYTHON:?set SCMO_SCANPY_PYTHON}
 rna_annotation_table=${SCMO_ANNOTATION:-}
 rna_exclude_cell_type=${SCMO_EXCLUDE_CELL_TYPE:-NA}
+# Project-local ALLC staging root. Archives must already be extracted here.
 allc_sources=${SCMO_ALLC_SOURCES:-[]}
 sample_ids=${SCMO_SAMPLE_IDS:-}
 
+# Technical covered-CpG eligibility plus the requested overall mCG threshold.
+# MethSCAn expresses methylation thresholds as percentages and treats the
+# minimum as inclusive. max_meth=100 is only the valid-domain ceiling and does
+# not impose an effective project upper filter.
 min_sites=${SCMO_MIN_SITES:-300000}
 min_meth=${SCMO_MIN_METH_PERCENT:-50}
 max_meth=${SCMO_MAX_METH_PERCENT:-100}
@@ -38,6 +44,8 @@ prepare_chunksize=${SCMO_PREPARE_CHUNKSIZE:-10000000}
 min_free_gb=${SCMO_MIN_FREE_GB:-10}
 cov_conversion_workers=${SCMO_COV_WORKERS:-${SLURM_CPUS_PER_TASK:-16}}
 cov_compresslevel=${SCMO_COV_COMPRESSLEVEL:-1}
+
+# Downstream VMR representation defaults.
 vmr_min_cell_fraction=${SCMO_VMR_MIN_CELL_FRACTION:-0.05}
 cell_min_regions=${SCMO_CELL_MIN_REGIONS:-100}
 pca_components=${SCMO_PCA_COMPONENTS:-30}

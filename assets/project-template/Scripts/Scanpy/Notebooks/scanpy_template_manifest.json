@@ -1,0 +1,29 @@
+{
+  "template": "scanpy_workflow.ipynb",
+  "purpose": "Provenance for the packaged workflow notebook. Nothing reads this file: it is a record for a maintainer, not an enforced invariant. An earlier revision of it listed a per-cell sha256 for each template cell; those digests matched no cell under any scheme the notebook's own text implies, so they were removed rather than left behind looking verified. Recomputing them would not help either, because a digest cannot tell an intended deviation from an accidental edit; the deviations list below can.",
+  "generated_from": {
+    "notebook": "Scripts/Scanpy/Notebooks/example_ipf_scanpy.ipynb",
+    "note": "The packaged example notebook of the two-donor lung-tissue study described in config/examples/README.md. The template cells were derived from it by washing data-source-specific content out; the deviations are listed below and are not limited to the digest of any single cell.",
+    "source_cells": 24,
+    "source_code_cells": 17,
+    "packaged_example": "Scripts/Scanpy/Notebooks/example_ipf_scanpy.ipynb",
+    "packaged_example_cells": 25,
+    "packaged_example_code_cells": 17,
+    "note_on_counts": "The packaged example has one more cell than the pre-washing source it came from: an inserted bilingual warning that the reviewed cluster-to-cell-type mapping must never be transplanted."
+  },
+  "documented_deviations": [
+    "The parameter cell reads a JSON sidecar named by SCMO_SCANPY_PARAMETERS instead of project literals.",
+    "read_10x_zip becomes read_10x_matrix with 10x_mtx and 10x_h5 branches; the ZIP branch is preserved.",
+    "The cohort label is the configured cell_id_prefix, so RNA cell IDs match ALLC cell IDs downstream.",
+    "The unused marker_genes lineage dictionary is not carried over; panels come from configuration.",
+    "Panels, the reviewed cluster mapping and focus-cluster lists are injected; an empty panel makes the candidate branch emit data-driven evidence instead of score-based proposals.",
+    "The candidate directory guard honours overwrite_data_outputs so an interrupted run can resume in the same run directory.",
+    "Sample palette, mitochondrial and ribosomal prefixes, target sum and HVG batch key are injected.",
+    "The input presence check accepts a directory (10x_mtx) and reports the input format; the source notebook only read ZIPs.",
+    "The ZIP branch rejects absolute members and members containing `..` before extracting.",
+    "Focus dotplots are skipped unless their panel and cluster lists are configured.",
+    "The save cell writes notebook_artifacts.json so the harness records evidence without re-deriving filenames.",
+    "Cell 1 selects the inline matplotlib backend so the executed notebook carries the figures of the run; the runner executes headlessly.",
+    "Cell sources are re-chunked to one JSON entry per line; the rendered code text is unchanged."
+  ]
+}

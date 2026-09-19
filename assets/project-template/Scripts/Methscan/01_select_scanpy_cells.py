@@ -173,8 +173,13 @@ def main():
         writer.writeheader()
         writer.writerows(excluded)
 
+    allc_roots = sorted({str(row["allc_root"]) for row in sample_rows})
     summary = {
-        "allc_source": str(source),
+        # Report every configured root: with a sample manifest there is no single ALLC source,
+        # and the discovery loop's last sample is not one. The list is the canonical record;
+        # the scalar keeps its type for readers that expect a string.
+        "allc_source": allc_roots[0] if len(allc_roots) == 1 else ",".join(allc_roots),
+        "allc_roots": allc_roots,
         "discovered_allc_cells": len(allc_rows),
         "discovered_by_sample": dict(sorted(discovered_by_sample.items())),
         "scanpy_annotation_cells": len(annotation_rows),

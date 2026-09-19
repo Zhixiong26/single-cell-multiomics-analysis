@@ -1,0 +1,158 @@
+# EXAMPLE intake -- not a default, not a template contract.
+#
+# This is a filled-in instance of the intake schema, reconstructed from a real
+# two-donor lung-tissue study (10x RNA + per-cell indexed ALLC). It is checked in
+# so that a new project has a concrete, working example of every field instead of
+# a blank schema. Nothing here is inherited by a generated project unless you
+# pass this file to init_project.py yourself.
+#
+# Run it with:
+#   python scripts/init_project.py \
+#     --intake assets/project-template/config/examples/example-ipf-tissue.yaml \
+#     --output /path/to/new-project
+#
+# The companion example-samples.tsv holds the same two sample rows in the
+# generated manifest form. Read README.md in this directory for the observed
+# result magnitudes and for what must be re-derived rather than copied.
+
+schema_version: 2
+project_id: ipf-tissue-example
+
+organism: human
+# Both prefixes are checked; a project whose mitochondrially-encoded genes use a
+# different convention declares it here rather than editing the Scanpy notebook.
+mitochondrial_prefixes: ["MT-", "mt-"]
+ribosomal_prefixes: ["RPL", "RPS"]
+
+references:
+  genome_id: GRCh38
+  # `chrom_sizes` and `blacklist` are deliberately OMITTED: the skill ships both
+  # under Supplementary/ and init_project.py fills in whichever key the intake
+  # leaves blank, then records that it did so in the generated Report.md. A
+  # project declaring another organism or genome keeps the preflight failure
+  # instead, so it can never inherit hg38 coordinates by accident. Declare the
+  # keys -- alone or together -- to use files of your own instead.
+  # chrom_sizes: my_genome.chrom.sizes
+  # blacklist: my_blacklist.bed.gz
+  # blacklist_md5: <md5 of your blacklist; the ALLCools and VMR stages verify it>
+  tss_bed: null
+
+# Where the inputs under Data/ come from. Generation creates Data/<name> as a
+# symlink to each `path`, so the project reads its own Data/ while the bytes stay
+# where they already are -- a shared read-only directory, another group's storage,
+# an archive mount. The sample paths above are written relative to the project root
+# (Data/Matrix/..., Data/ALLCools/...), which is what makes them self-describing.
+# A relative `path` here is anchored to this file's directory rather than to the
+# working directory, so the same intake links the same targets wherever it is run.
+# A `url` source is not fetched at generation time; `tools/link_data.py --execute`
+# downloads it, and it must carry the sha256 of the finished file because every
+# later stage reads whatever is at the destination as data.
+# The paths below stand in for the study's shared storage; substitute your own.
+data:
+  sources:
+    - name: Matrix
+      path: /shared/lung-tissue/Matrix
+    - name: ALLCools
+      path: /shared/lung-tissue/ALLCools
+
+annotation:
+  # null is the honest init-time state: the annotation table is produced BY the
+  # Scanpy route, so it cannot exist yet. An absent table makes the workflow
+  # generate Unassigned metadata and keeps cell-type DMR and VMR+DMR disabled.
+  # Set the path here once the Scanpy route has exported the table and a human
+  # has reviewed the cluster labels, then set review_status to approved. A
+  # literal placeholder path would block every plan for no benefit.
+  table: null
+  profile: null
+  review_status: unreviewed
+  cell_id_column: cell_id
+  cell_type_column: cell_type
+
+samples:
+  # cell_id_prefix is what makes RNA barcodes and ALLC filenames joinable:
+  # RNA becomes CYL_<barcode> and the ALLC file CYL_<barcode>_allc.gz resolves to
+  # the same ID. With no allc_cell_id_regex the trailing _allc.gz is stripped.
+  - sample_id: CYL
+    condition: IPF
+    # This study integrated on donor, so batch is the sample itself; the Scanpy
+    # batch key is the cohort label, not this column.
+    batch: CYL
+    include: true
+    rna_path: Data/Matrix/25100718_CYL_E/filtered_feature_bc_matrix.zip
+    rna_format: 10x_zip
+    allc_root: Data/ALLCools/25100718_CYL_Met/allcools
+    allc_glob: "**/*.allc.tsv.gz"
+    cell_id_prefix: CYL
+    allc_cell_id_regex: ""
+    allc_cell_id_replacement: ""
+  - sample_id: ZCP
+    condition: IPF
+    batch: ZCP
+    include: true
+    rna_path: Data/Matrix/25100718_ZCP_E/filtered_feature_bc_matrix.zip
+    rna_format: 10x_zip
+    allc_root: Data/ALLCools/25100718_ZCP_Met/allcools
+    allc_glob: "**/*.allc.tsv.gz"
+    cell_id_prefix: ZCP
+    allc_cell_id_regex: ""
+    allc_cell_id_replacement: ""
+
+# No `environments` block on purpose. Declaring placeholder interpreter paths
+# would make every plan fail with "required environment stages are absent" until
+# they were hand-edited. Leaving it empty lets the documented flow fill it in:
+#
+#   python tools/bootstrap_environments.py --project PROJECT           # read-only plan
+#   python tools/bootstrap_environments.py --project PROJECT --execute # create + record
+#
+# The stages bootstrap records are `orchestrator`, `scanpy_allcools`, `methscan`,
+# and `methylvi`. If you already have compatible shared environments, declare
+# those rows instead; bootstrap reuses them read-only and never upgrades them.
+
+# Only the values this study actually decided are listed. Everything omitted
+# falls back to the generated analysis.yaml default, which already mirrors the
+# authoritative Scanpy notebook (min_genes 200, max_genes 6000, min_counts 500,
+# max_mt_percent 5.0, target_sum 10000, n_top_genes 2000, n_comps 50, n_pcs 30,
+# n_neighbors 15, harmony max_iter 20 / sigma 0.1, umap min_dist 0.5 / spread 1.0,
+# leiden 0.8, seed 0).
+analysis:
+  scanpy:
+    # Harmony's initial cluster count is derived, not configured: the notebook
+    # computes min(100, max(2, round(n_obs / 30))), which saturates at 100 here.
+    hvg:
+      batch_key: cohort
+  methscan:
+    # 300k covered CpGs per cell is a technical eligibility floor, not a
+    # biological threshold; methylation percentages are MethSCAn's own units.
+    min_sites: 300000
+    min_meth_percent: 50
+    max_meth_percent: 100
+    smooth_bandwidth: 1000
+    scan_bandwidth: 2000
+    scan_stepsize: 100
+    min_cells: 6
+    vmr_thresholds: [0.01, 0.02, 0.05]
+    dmr:
+      raw_p: 0.01
+      min_abs_diff: 0.25
+      top_per_cell_type: 200
+  allcools:
+    bin_size: 5000
+    mc_context: CGN
+    blacklist_fraction: 0.2
+  methylvi:
+    feature_targets: [10000, 30000]
+    epochs: 500
+    batch_size: 32
+    seed: 0
+    validation_fraction: 0.1
+    supervised_umap_weights: [0.2, 0.5, 0.7, 0.9]
+
+# Site policy is deliberately left empty. Partitions, accounts, allowed or
+# excluded nodes, and per-profile resources are properties of the cluster you
+# run on; copy them from your own site, never from this example.
+scheduler:
+  backend: local
+  account: null
+  partitions: []
+  allow_nodes: []
+  exclude_nodes: []

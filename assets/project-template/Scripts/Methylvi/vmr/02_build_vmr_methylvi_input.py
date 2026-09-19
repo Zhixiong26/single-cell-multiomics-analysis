@@ -19,6 +19,7 @@ import pandas as pd
 
 _REGIONS = None
 _N_REGIONS = 0
+_MC_PREFIX = "CG"
 
 
 def file_sha256(path: Path) -> str:
@@ -53,9 +54,9 @@ def load_regions(path: Path) -> tuple[pd.DataFrame, dict[str, tuple[np.ndarray, 
     return table, lookup
 
 
-def init_worker(regions, n_regions: int) -> None:
-    global _REGIONS, _N_REGIONS
-    _REGIONS, _N_REGIONS = regions, n_regions
+def init_worker(regions, n_regions: int, mc_prefix: str) -> None:
+    global _REGIONS, _N_REGIONS, _MC_PREFIX
+    _REGIONS, _N_REGIONS, _MC_PREFIX = regions, n_regions, mc_prefix
 
 
 def checkpoint_valid(path: Path, cell: str) -> bool:
@@ -88,7 +89,7 @@ def build_row(task: tuple[int, str, str, str]) -> dict[str, object]:
             fields = line.rstrip().split("\t")
             if len(fields) < 6:
                 raise ValueError(f"{allc_string}:{line_number}: expected >=6 columns")
-            if not fields[3].upper().startswith("CG"):
+            if not fields[3].upper().startswith(_MC_PREFIX):
                 continue
             region = _REGIONS.get(fields[0])
             if region is None:
@@ -132,6 +133,12 @@ def main() -> None:
     parser.add_argument("--max-cells", type=int, default=0, help="Optional bounded validation subset")
     parser.add_argument("--mc-context", default=os.environ.get("VMR_MC_CONTEXT", os.environ.get("SCMO_MC_CONTEXT", "CGN")))
     args = parser.parse_args()
+    # The ALLC context column holds the dinucleotide plus an optional third letter (CGN, CHN, CGH).
+    # Compare on the dinucleotide so a configured non-CG context selects its own records: a hardcoded
+    # "CG" test would retain nothing under CHN and quietly emit an all-zero matrix.
+    mc_prefix = str(args.mc_context).strip().upper()[:2]
+    if len(mc_prefix) != 2 or not mc_prefix.isalpha() or not mc_prefix.startswith("C"):
+        raise ValueError("mc-context must name a cytosine context such as CGN or CHN: %r" % args.mc_context)
     if args.threads < 1 or not 0 <= args.min_covered_percent <= 100 or args.max_cells < 0 or args.target_features < 2:
         raise ValueError("threads must be positive; min-covered-percent must be in [0,100]; max-cells non-negative")
     for path in (args.bed, args.allc_table, args.annotation):
@@ -176,7 +183,7 @@ def main() -> None:
         tasks.append((row_index, row.cell_id, str(allc), str(checkpoint)))
     built = reused = 0
     with cf.ProcessPoolExecutor(
-        max_workers=args.threads, initializer=init_worker, initargs=(lookup, len(regions)),
+        max_workers=args.threads, initializer=init_worker, initargs=(lookup, len(regions), mc_prefix),
     ) as executor:
         for completed, result in enumerate(executor.map(build_row, tasks), start=1):
             built += result["status"] == "built"

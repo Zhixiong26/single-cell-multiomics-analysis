@@ -16,8 +16,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from _common import (
-    WorkflowError, load_environments, load_project, load_samples, project_files,
-    resolve_path, sha256_file, signature, write_json,
+    WorkflowError, load_environments, load_project, load_samples, parse_memory_mb,
+    plan_data_sources, project_files, resolve_path, sha256_file, signature,
+    stored_data_sources, write_json,
 )
 
 
@@ -162,6 +163,34 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
     if len(set(allc_cell_ids)) != len(allc_cell_ids):
         errors.append("ALLC-derived cell IDs must be unique across included samples")
 
+    # Declared inputs are checked where they will be read, not where they were
+    # declared: a link that resolves on the login host and dangles on the compute
+    # host is the failure this catches, and it names the link rather than the stage.
+    data_plans = plan_data_sources(files["root"], stored_data_sources(cfg))
+    data_validation = []
+    for plan in data_plans:
+        entry = {"name": plan["name"], "destination": plan["destination"],
+                 "state": plan["state"], "origin": plan["url"] or plan["target"]}
+        if plan["state"] == "conflict":
+            errors.append("Data/%s exists but is not the entry data.sources declares (%s)"
+                          % (plan["name"], entry["origin"]))
+        elif plan["state"] == "dangling" and require_paths:
+            errors.append("Data/%s does not resolve: %s is not reachable from here, so every stage would "
+                          "fail on it. Run `python tools/link_data.py --project . --execute` where both are "
+                          "visible, or validate from the execution context" % (plan["name"], entry["origin"]))
+        elif plan["state"] == "download" and require_paths:
+            errors.append("Data/%s is declared as a download and has not been fetched; run "
+                          "`python tools/link_data.py --project . --execute`" % plan["name"])
+        elif plan["state"] == "present" and mode == "full":
+            # Deferred to full mode: the digest is the only thing that can tell a
+            # finished transfer from a truncated one, and it reads the whole file.
+            observed = sha256_file(Path(plan["destination"]))
+            if observed.lower() != plan["sha256"]:
+                errors.append("Data/%s has sha256 %s, not the declared %s"
+                              % (plan["name"], observed, plan["sha256"]))
+            entry["sha256"] = observed
+        data_validation.append(entry)
+
     references = cfg.get("references") or {}
     reference_hashes = {}
     for key in ("chrom_sizes", "blacklist", "tss_bed"):
@@ -252,6 +281,28 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
         profile = profiles.get(name) or profiles.get("default")
         if not profile or any(level not in profile for level in ("floor", "target", "ceiling")):
             errors.append("scheduler resource profile %s lacks floor/target/ceiling" % name)
+    for name, profile in sorted(profiles.items()):
+        # A profile that is not monotonic cannot mean what its author intended: inspect_resources
+        # clamps the target down to the ceiling and refuses any node below the floor, so a floor
+        # above the target asks for more than the job will ever request. The `dmr` floor once sat
+        # below the parallelism its own stage declares -- the same class of mistake -- so the
+        # ordering is checked here rather than discovered as a failed task on a busy node.
+        if not isinstance(profile, dict) or any(level not in profile for level in ("floor", "target", "ceiling")):
+            continue  # already reported above when the profile is one of the required ones
+        levels = ("floor", "target", "ceiling")
+        try:
+            cpus = {level: int(profile[level]["cpus"]) for level in levels}
+            memory = {level: parse_memory_mb(profile[level]["memory"]) for level in levels}
+        except (KeyError, TypeError, ValueError, WorkflowError) as exc:
+            errors.append("scheduler resource profile %s has an unreadable cpus/memory value: %s"
+                          % (name, exc))
+            continue
+        for field, values in (("cpus", cpus), ("memory", memory)):
+            if not values["floor"] <= values["target"] <= values["ceiling"]:
+                errors.append(
+                    "scheduler resource profile %s must satisfy floor <= target <= ceiling for %s; "
+                    "it declares %s"
+                    % (name, field, " <= ".join(str(values[level]) for level in levels)))
 
     minimum = int(cfg.get("analysis", {}).get("methscan", {}).get("min_cells", 6))
     selected_annotation = annotation_rows
@@ -305,6 +356,10 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
                    "allc_samples": len(allc_samples), "allc_cells": len(allc_inventory)},
         "routes": routes, "references": reference_hashes, "environments": env_results,
         "allc_validation": sorted(allc_validation, key=lambda item: item["path"]),
+        # Recorded so a reader can see where each input actually came from. Not
+        # signed: the declared sources are already part of the input signature, and
+        # a link's transient state would otherwise churn that signature for nothing.
+        "data": data_validation,
         "code_signature": code_signature, "errors": errors, "warnings": warnings,
     }
     payload["input_signature"] = signature({

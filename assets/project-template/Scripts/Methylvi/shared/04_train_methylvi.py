@@ -28,8 +28,14 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=int(os.environ["SCMO_BATCH_SIZE"]))
     parser.add_argument("--threads", type=int, default=int(os.environ["SCMO_THREADS"]))
     parser.add_argument("--seed", type=int, default=int(os.environ["SCMO_SEED"]))
+    # Reads the configured split rather than assuming scvi's default, so methylvi.validation_fraction
+    # is a live parameter. Soft default keeps the standalone routes working without the DAG's env.
+    parser.add_argument("--validation-fraction", type=float,
+                        default=float(os.environ.get("SCMO_VALIDATION_FRACTION", "0.1")))
     parser.add_argument("--accelerator", choices=("auto", "cpu", "gpu"), default="auto")
     args = parser.parse_args()
+    if not 0 < args.validation_fraction < 1:
+        raise ValueError("validation-fraction must be between 0 and 1: %r" % args.validation_fraction)
     args.output.mkdir(parents=True, exist_ok=True)
     scvi.settings.seed = args.seed
     torch.set_num_threads(args.threads)
@@ -57,8 +63,12 @@ def main() -> None:
     accelerator = args.accelerator
     if accelerator == "auto":
         accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+    # MethylVI.train defaults train_size to 0.9 on its own, independently of validation_size, and
+    # then rejects train_size + validation_size > 1 -- so passing validation_size alone would fail
+    # for any fraction above 0.1. Both come from the configured fraction instead.
     model.train(
         max_epochs=args.epochs, early_stopping=True, batch_size=args.batch_size,
+        train_size=1.0 - args.validation_fraction, validation_size=args.validation_fraction,
         accelerator=accelerator, devices=1,
     )
     model.save(args.output / "model", overwrite=True, save_anndata=False)
@@ -76,6 +86,7 @@ def main() -> None:
         "input": str(args.input), "cells": embedding.n_obs, "features": adata.n_vars,
         "batch_key": args.batch_key, "batch_levels": int(adata.obs[args.batch_key].nunique()),
         "accelerator": accelerator, "epochs_requested": args.epochs,
+        "validation_fraction": args.validation_fraction,
     }
     (args.output / "run_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 

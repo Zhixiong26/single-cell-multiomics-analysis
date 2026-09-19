@@ -10,6 +10,61 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Dict
+
+# `tools/` holds the packaged runtime modules. Resolving it from this file's own location
+# (Scripts/Common/<this file> -> project root) keeps the adapter runnable when invoked directly,
+# and keeps the import at module scope on purpose: publish_annotation() and the other helpers are
+# module-level functions, so a name imported inside main() would be a local of main() and raise
+# NameError the moment such a helper referenced it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+from _common import (  # noqa: E402  (must follow the sys.path insert above)
+    WorkflowError, load_environments, load_project, project_files, resolve_path, write_json,
+)
+
+
+def publish_annotation(result: Path, summary: Dict[str, Any]) -> None:
+    """Publish the Scanpy notebook's own cell table as the run annotation handoff.
+
+    The notebook reports which table and which column carry its labels, so this adapter needs no
+    knowledge of run kinds or of the label column name. Labelled rows are written as
+    `annotation.tsv` for the methylation stages; a run whose labels still await review is
+    recorded in `annotation_status.json` instead of being passed off as approved annotation.
+    """
+    source = summary.get("annotation_table")
+    column = summary.get("annotation_key")
+    if not source or not column:
+        return
+    source_path = Path(str(source))
+    if not source_path.is_file():
+        raise WorkflowError("scanpy annotation table is absent: %s" % source_path)
+    with source_path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        columns = list(reader.fieldnames or ())
+        if "cell_id" not in columns or column not in columns:
+            raise WorkflowError("scanpy annotation table must contain cell_id and %s: %s"
+                                % (column, source_path))
+        target = result / "annotation.tsv"
+        fieldnames = ["cell_id", "cell_type"] + [name for name in columns
+                                                 if name not in {"cell_id", column, "cell_type"}]
+        with target.open("w", newline="") as sink:
+            writer = csv.DictWriter(sink, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
+            writer.writeheader()
+            for row in reader:
+                record_row = {name: row.get(name, "") for name in fieldnames}
+                record_row["cell_type"] = (row.get(column) or "").strip()
+                writer.writerow(record_row)
+    status = {"run_kind": summary.get("run_kind"), "iteration_id": summary.get("iteration_id"),
+              "annotation_status": summary.get("annotation_status"),
+              "annotation_key": column, "annotation_table": str(target),
+              "n_cells": summary.get("n_cells"), "n_clusters": summary.get("n_clusters"),
+              "analysis_signature": summary.get("analysis_signature")}
+    write_json(result / "annotation_status.json", status)
+    if summary.get("annotation_status") != "reviewed":
+        print("scanpy labels are proposals pending review (%s); review the marker evidence and "
+              "record the mapping with tools/record_annotation_review.py before cell-type DMR "
+              "routes may use them" % summary.get("annotation_status"), file=sys.stderr)
+    print(json.dumps(status, indent=2, sort_keys=True))
 
 
 def main() -> int:
@@ -20,8 +75,6 @@ def main() -> int:
     parser.add_argument("--task-dir", type=Path, required=True)
     args = parser.parse_args()
     root = args.project.resolve()
-    sys.path.insert(0, str(root / "tools"))
-    from _common import WorkflowError, load_environments, load_project, project_files, resolve_path, write_json
 
     cfg = load_project(root)
     plan = json.loads((root / ".workflow" / "runs" / args.run_id / "plan.json").read_text())
@@ -118,6 +171,7 @@ def main() -> int:
         "SCMO_TARGET_FEATURES": str(max_features), "SCMO_MAX_FEATURES": str(max_features),
         "SCMO_EPOCHS": str(mvi.get("epochs", 500)),
         "SCMO_BATCH_SIZE": str(mvi.get("batch_size", 32)), "SCMO_SEED": str(mvi.get("seed", 0)),
+        "SCMO_VALIDATION_FRACTION": str(mvi.get("validation_fraction", 0.1)),
         "SCMO_THREADS": os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SCMO_CPUS", "1")),
         "MPLBACKEND": "Agg", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1",
@@ -148,8 +202,17 @@ def main() -> int:
     parameters = item.get("parameters", {})
     if task == "scanpy":
         out = result / "scanpy"
-        run([scanpy_python, scripts / "Scanpy/run_scanpy_project.py", "--project", root, "--output-dir", out])
-        record([out / "completion_summary.json", out / "scanpy_result.h5ad"])
+        run([scanpy_python, scripts / "Scanpy/run_scanpy_notebook.py",
+             "--project", root, "--run-id", args.run_id, "--output-dir", out])
+        summary_path = out / "completion_summary.json"
+        if not summary_path.is_file():
+            raise WorkflowError("scanpy runner wrote no completion summary: %s" % summary_path)
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        record([Path(summary["notebook"]), Path(summary["parameters"]), summary_path,
+                out / "scanpy_workflow_executed.ipynb"]
+               + [Path(value) for value in summary.get("artifacts", [])])
+        if annotation_table is None:
+            publish_annotation(result, summary)
     elif task == "methscan_select_convert":
         run(["bash", scripts / "Methscan/run_methscan_common.sbatch", meth_root])
         if annotation_table is None:
@@ -204,7 +267,7 @@ def main() -> int:
         features = int(parameters["features"])
         route = mvi_root / "allcools" / ("features_%d" % features)
         train_model(root, scripts, methylvi_python, route, env, run)
-        record([route / "results/methylvi_embedding.h5ad", route / "model.COMPLETE"])
+        record(model_artifacts(route))
     elif task.startswith("methylvi_vmr_features_"):
         threshold = str(parameters["threshold"])
         route, shared = mvi_root / "vmr" / ("var_%s" % threshold), mvi_root / "vmr" / ("var_%s/shared" % threshold)
@@ -226,12 +289,12 @@ def main() -> int:
         run([methylvi_python, scripts / "Methylvi/vmr_dmr/02_combine_vmr_and_dmr_inputs.py",
              "--vmr-input", base, "--dmr-input", dmr_input, "--output", route / "input.h5mu"])
         train_model(root, scripts, methylvi_python, route, env, run)
-        record([route / "input.h5mu", route / "results/methylvi_embedding.h5ad", route / "model.COMPLETE"])
+        record([route / "input.h5mu"] + model_artifacts(route))
     elif task.startswith("methylvi_vmr_"):
         threshold, features = str(parameters["threshold"]), int(parameters["features"])
         route = mvi_root / "vmr" / ("var_%s" % threshold) / ("features_%d" % features)
         train_model(root, scripts, methylvi_python, route, env, run)
-        record([route / "results/methylvi_embedding.h5ad", route / "model.COMPLETE"])
+        record(model_artifacts(route))
     elif task == "pooled_dmr_prepare":
         out = mvi_root / "vmr_dmr/shared/dmr"
         run([methylvi_python, scripts / "Methylvi/vmr_dmr/01_prepare_all_unique_pooled_dmrs.py",
@@ -277,6 +340,31 @@ def vmr_environment(base, root, meth_root, annotation, chrom_sizes, blacklist,
         "VMR_MC_CONTEXT": str(context),
     })
     return values
+
+
+def model_artifacts(route):
+    """Everything train_model writes for a route to count as complete.
+
+    The list is deliberately wider than the embedding alone: a route whose model directory or
+    figures were deleted must not still validate as complete. `supervised_umap_summary.json` is
+    required even though that stage may legitimately produce no figures — it always writes a
+    summary saying whether it plotted or skipped, so the file's presence is a real requirement
+    while its figures are not.
+    """
+    results = route / "results"
+    return [
+        route / "model.COMPLETE",
+        results / "run_summary.json",
+        results / "methylvi_latent.npy",
+        results / "methylvi_embedding.h5ad",
+        results / "model",
+        results / "methylvi_vmr_umap_cell_type.png",
+        results / "methylvi_vmr_umap_sample_id.png",
+        results / "methylvi_vmr_umap_condition.png",
+        results / "methylvi_vmr_umap_methylVI_leiden.png",
+        results / "supervised_umap/supervised_umap_summary.json",
+        results / "qc/methylation_qc_summary.json",
+    ]
 
 
 def train_model(root, scripts, python, route, base_env, runner):

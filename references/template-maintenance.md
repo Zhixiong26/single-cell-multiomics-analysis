@@ -2,6 +2,16 @@
 
 Keep algorithm scripts in stage directories, remove site paths and sample labels, and route project values through configuration or explicit CLI/environment inputs. Record source-to-template mapping in `migration-inventory.tsv`. Replace static Slurm resources with scheduler profiles.
 
+Two document contracts exist and are not interchangeable. The root `README.md` is written once by `init_project.py` from the intake and the resolved configuration, and is never rewritten with runtime state; the root `Report.md` run log is owned by `build_report_text()` in `tools/_common.py` and grows one record per run. The module documents under `Scripts/<Module>/` are static reference material and are never updated by a run.
+
+Know what the execution signature covers before copying tools into a live project. `code_signature` hashes `.py`, `.sh`, and `.sbatch` files under `Scripts/` and `tools/`, plus `environment-specs/*.yaml` and `workflow.py`; markdown is outside it. Appending to a Report therefore cannot invalidate a recorded plan, but re-copying `tools/` from a newer release does change `code_signature`, which changes `input_signature`, orphans recorded full validations, and prevents an in-flight run from resuming until it is re-validated. Document that consequence in the release notes instead of leaving it to be discovered.
+
 Do not package logs, results, checkpoints, notebook output, credentials, Python caches, legacy uppercase `Config`, or dynamic state. The project generator must ignore `__pycache__`, bytecode, test caches, notebook checkpoints, OS metadata, and stale pre-schema-v2 configuration directories even when they exist in the installed skill checkout. Increment `VERSION` for releases and keep schema compatibility within a minor version.
 
-Only runtime-reachable scripts belong in the execution signature. Interactive notebooks are templates, not executable workflow inputs, and are excluded. Do not retain independent Slurm wrappers that bypass the run DAG and its completion evidence.
+`assets/project-template/Supplementary/` is the one place packaged data is allowed, and only for immutable public reference files that a config key would otherwise force every project to supply — today human hg38 chromosome sizes and the ENCODE GRCh38 exclusion list, both a few kilobytes. A bundled reference must be project-independent, must not name a site, and must be small and public; `Supplementary/README.md` records its source and digests there. Anything study-specific belongs in the intake, never here: a cell-type mapping or a site environment inventory shipped as a default would apply one study's answer to the next project while looking like configuration. `init_project.py` verifies the bundled blacklist against its recorded md5 before defaulting it, so a corrupt install fails at generation instead of writing an unchecked digest into a project.
+
+Input data is never packaged. The template ships the `Data/` convention, not its contents: the generator links declared sources into it, and anything that would make a generated project's `Data/` non-empty is a defect.
+
+Only runtime-reachable scripts belong in the execution signature. Interactive notebooks are templates, not executable workflow inputs, and are excluded.
+
+Standalone Slurm wrappers are packaged alongside the run DAG so a stage can be explored, smoke-tested, or recovered without a plan. Each wrapper must resolve resources from a named scheduler profile, carry no `#SBATCH` site directive and no absolute site path, and never stand in for a run's completion evidence.

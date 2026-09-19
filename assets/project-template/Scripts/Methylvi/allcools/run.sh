@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 # Unified .cov -> ALLCools -> MethylVI entry point.
 set -euo pipefail
-[[ -n "${SCMO_MANAGED_RUN_ID:-}" ]] || { echo "Use workflow.py plan/submit; direct run.sh execution is disabled" >&2; exit 2; }
+# The run DAG is the production path and is identified by SCMO_MANAGED_RUN_ID,
+# which task_adapter.py injects. A standalone run is allowed only when it is
+# explicitly acknowledged, so a non-DAG run is never reached by accident. That
+# mode writes no task_outputs.json and is not a run's completion evidence; it
+# exists for exploring a stage, smoke testing a change, and recovering one stage.
+if [[ -z "${SCMO_MANAGED_RUN_ID:-}" ]]; then
+  if [[ "${SCMO_STANDALONE_ACK:-0}" != 1 ]]; then
+    echo "Production runs go through the run DAG: plan_workflow.py, then submit_workflow.py." >&2
+    echo "For exploration, smoke testing, or recovery, set SCMO_STANDALONE_ACK=1." >&2
+    exit 2
+  fi
+  echo "WARNING: standalone run without a managed run ID; no completion evidence is recorded." >&2
+fi
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# The run DAG and the packaged sbatch wrappers export SCMO_PROJECT_ROOT; a call
+# made by hand does not, so locate the project from this script's own path. This
+# mirrors the submit_*.sh entry points and keeps the direct call described in
+# references/execution.md working without extra setup.
+export SCMO_PROJECT_ROOT=${SCMO_PROJECT_ROOT:-$(cd "$here/../../.." && pwd)}
 source "$here/00_methylvi_config.sh"
 shared_scripts="$here/../shared"
 stage=${1:-all}

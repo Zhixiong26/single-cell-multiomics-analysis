@@ -167,11 +167,19 @@ def main() -> None:
             annotated = name in annotation.index
             if args.include_unannotated or annotated:
                 selected.append((name, path.resolve()))
+    # The selection stage prefixes every cell ID with its sample, but that prefix is a naming
+    # convention rather than an identifier: a sample called e.g. "patient_01" makes the split
+    # ambiguous. The manifest already carries the authoritative sample_id for each cell, so use it
+    # when present and record below which attribution was actually applied.
+    sample_of: dict[str, str] = {}
+    if source_is_allc and "sample_id" in manifest.columns:
+        sample_of = {str(name): str(value).strip() for name, value in manifest["sample_id"].items()}
+
     if args.max_cells:
         if args.balanced_cohorts:
             groups: dict[str, list[tuple[str, Path]]] = {}
             for item in selected:
-                groups.setdefault(item[0].split("_", 1)[0], []).append(item)
+                groups.setdefault(sample_of.get(item[0]) or item[0].split("_", 1)[0], []).append(item)
             balanced: list[tuple[str, Path]] = []
             while len(balanced) < args.max_cells and any(groups.values()):
                 for cohort in sorted(groups):
@@ -195,7 +203,10 @@ def main() -> None:
         "include_unannotated": args.include_unannotated, "max_cells": args.max_cells,
         "balanced_cohorts": args.balanced_cohorts,
         "mc_context": args.mc_context,
-        "cohorts": pd.Series([name.split("_", 1)[0] for name, _path in selected]).value_counts().to_dict(),
+        # "cell_id prefix" means the manifest lacked a sample_id column, so the cohort counts here
+        # and any balanced-cohort subsampling above rest on a naming convention, not a declaration.
+        "sample_attribution": "manifest sample_id" if sample_of else "cell_id prefix",
+        "cohorts": pd.Series([sample_of.get(name) or name.split("_", 1)[0] for name, _path in selected]).value_counts().to_dict(),
     }
     summary["existing_allc_available"] = len(selected) if source_is_allc else sum(
         valid_allc(args.existing_allc_dir / f"{name}.allc.tsv.gz") for name, _path in selected

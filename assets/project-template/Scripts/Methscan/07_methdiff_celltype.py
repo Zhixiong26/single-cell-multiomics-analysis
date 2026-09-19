@@ -276,8 +276,10 @@ def main():
     allocated_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", args.jobs * args.threads))
     if args.jobs * args.threads > allocated_cpus:
         raise ValueError(
-            "jobs * threads exceeds SLURM_CPUS_PER_TASK: %d * %d > %d"
-            % (args.jobs, args.threads, allocated_cpus)
+            "jobs * threads exceeds SLURM_CPUS_PER_TASK: %d * %d > %d; raise the cpus floor of this "
+            "task's scheduler profile (dmr) to at least %d, or lower SCMO_METHDIFF_JOBS/"
+            "SCMO_METHDIFF_THREADS to match it"
+            % (args.jobs, args.threads, allocated_cpus, args.jobs * args.threads)
         )
     if args.output_dir.exists() and any(args.output_dir.iterdir()) and not args.resume:
         raise FileExistsError("Meth-diff output is not empty: %s" % args.output_dir)

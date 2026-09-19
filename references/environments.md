@@ -27,6 +27,8 @@ If profiles remain unresolved, create them and update `config/environments.tsv`:
 
 The default prefixes are `PROJECT/.environments/analysis-core`, `methscan`, and `methylvi`, with a writable package cache under the same root. Use `--prefix-root /new/writable/location` when project storage is unsuitable. `mamba` is preferred when present; otherwise `conda` is used. A specific manager may be passed with `--manager`.
 
+`Scripts/Environment/01_discover_environments.sh` prints a read-only TSV inventory of active tools and Conda prefixes. It searches the conventional `$HOME/miniconda3/envs` and `$HOME/miniforge3/envs` locations — portable guesses, not site assumptions — plus every root in the colon-separated `SCMO_ENV_ROOTS` and in `CONDA_ENVS_PATH`. A prefix outside those locations is found only if it is named there.
+
 Do not install into an active base environment, run `conda update`, or modify a discovered shared prefix. The bootstrapper refuses a non-empty target that fails verification. A failed creation is retained for diagnosis rather than silently deleted. Plans and results are saved under `.workflow/environment-bootstrap/`.
 
 Environment creation requires package-channel/network access and sufficient storage. If no Conda-compatible manager is available, installation fails before analysis with a clear prerequisite instead of bypassing validation.

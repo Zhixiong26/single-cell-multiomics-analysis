@@ -1,0 +1,3 @@
+sample_id	condition	batch	include	rna_path	rna_format	allc_root	allc_glob	cell_id_prefix	allc_cell_id_regex	allc_cell_id_replacement
+CYL	IPF	CYL	True	Data/Matrix/25100718_CYL_E/filtered_feature_bc_matrix.zip	10x_zip	Data/ALLCools/25100718_CYL_Met/allcools	**/*.allc.tsv.gz	CYL
+ZCP	IPF	ZCP	True	Data/Matrix/25100718_ZCP_E/filtered_feature_bc_matrix.zip	10x_zip	Data/ALLCools/25100718_ZCP_Met/allcools	**/*.allc.tsv.gz	ZCP
