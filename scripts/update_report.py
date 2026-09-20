@@ -17,7 +17,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from _common import WorkflowError, refresh_run_log
+from _common import WorkflowError, refresh_run_log, refresh_stage_run_logs
 
 
 def main() -> int:
@@ -41,6 +41,14 @@ def main() -> int:
         print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
     print("%s (%d record(s), %s)"
           % (outcome["path"], outcome["records"], "rewritten" if outcome["written"] else "unchanged"))
+    # The stage logs are the same summaries filtered per stage; a project that
+    # has no stage documents yet simply reports none and this prints nothing.
+    stage_outcome = refresh_stage_run_logs(root)
+    for warning in stage_outcome.get("warnings") or []:
+        print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
+    for stage in stage_outcome.get("stages") or []:
+        print("%s (%d record(s), %s)"
+              % (stage["path"], stage["records"], "rewritten" if stage["written"] else "unchanged"))
     return 0
 
 

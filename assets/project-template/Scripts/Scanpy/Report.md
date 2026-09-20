@@ -131,6 +131,8 @@ Copy the section below to the top of "迭代记录" (Iteration log) and fill in 
 - 现有输出 / Existing outputs：<文件及是否允许覆盖 / files and whether overwriting is allowed>
 - 执行结果 / Execution result：<完成位置、错误、耗时和资源信息 / completion point, errors, duration and resource information>
 - 五层验证 / Five-layer verification：<执行、结构、分析、注释、输出 / execution, structure, analysis, annotation, output>
+- 注释判定 / Annotation calls：<逐 cluster 的 cell type 与依据 marker，以及标记为不确定的 cluster / the cell type adopted per cluster with the markers behind it, and which clusters are flagged uncertain>
+- 注释确认 / Annotation confirmation：<用户已确认 / 已请求确认 / 待修正；修正内容与重跑范围 / confirmed by the user, asked and pending, or corrected — with what changed and what was re-run>
 - 最终注释 UMAP 诊断 / Final annotation UMAP diagnosis：<碎裂、混合、样本效应、QC 驱动、稀有群、marker/邻域一致性 / fragmentation, mixing, sample effects, QC-driven structure, rare populations, marker/neighbourhood agreement>
 - 参数候选与假设 / Parameter candidates and hypotheses：<本轮只改变的参数家族、候选值、预期改善 / the single parameter family changed this round, candidate values, expected improvement>
 - 候选输出目录 / Candidate output directory：<独立且不覆盖正式结果的路径 / an independent path that does not overwrite formal results>

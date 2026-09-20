@@ -19,13 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from _common import (LEGACY_RUN_STATE_END, LEGACY_RUN_STATE_START, RUN_KEY_SAFE_RE,
-                     RUNLOG_EMPTY, RUNLOG_END, RUNLOG_START, WorkflowError,
+                     RUNLOG_EMPTY, RUNLOG_END, RUNLOG_START, STAGE_CONTEXT_END,
+                     STAGE_CONTEXT_START, WorkflowError,
                      build_report_text, load_project, load_samples, load_structured,
-                     refresh_run_log,
+                     refresh_run_log, refresh_stage_run_logs, stage_for_task,
                      report_run_key, task_is_implemented,
                      validate_recorded_outputs)  # noqa: E402
 import bootstrap_environments as environment_bootstrap  # noqa: E402
 from bootstrap_environments import bootstrap  # noqa: E402
+from init_project import adapt_stage_docs, packaged_notebook  # noqa: E402
 from init_project import main as unused_init_main  # noqa: F401,E402
 from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
 from inspect_run import TERMINAL_BAD, inspect as inspect_run  # noqa: E402
@@ -557,18 +559,22 @@ class SkillTests(unittest.TestCase):
 
     # --- root README/Report: filled once at generation, appended per run -------
 
-    def record_run(self, project: Path, run_id: str, when: str, tasks, signature: str = "sig") -> Path:
+    def record_run(self, project: Path, run_id: str, when: str, tasks, signature: str = "sig",
+                   task_names=None) -> Path:
         """Write the run_summary.json that inspect_run.py leaves behind.
 
         Recording evidence directly keeps these tests to the documentation
         contract; executing a real run is covered by the plan/submit tests.
+        `task_names` names the tasks with real workflow ids so the per-stage
+        routing can be exercised; the default names belong to no stage.
         """
         run_dir = project / ".workflow" / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        rows = [{"task": "task_%d" % index, "job_id": "", "state": state,
+        names = list(task_names) if task_names else ["task_%d" % index for index in range(len(tasks))]
+        rows = [{"task": name, "job_id": "", "state": state,
                  "complete_marker": bool(valid), "evidence_valid": bool(valid),
                  "evidence_error": None, "resource_usage": None}
-                for index, (state, valid) in enumerate(tasks)]
+                for name, (state, valid) in zip(names, tasks)]
         if rows and all(row["evidence_valid"] for row in rows):
             status = "complete"
         elif any(row["state"] in TERMINAL_BAD for row in rows):
@@ -773,12 +779,18 @@ class SkillTests(unittest.TestCase):
             self.assertEqual(subprocess.call(report_cli + ["--run-id", "nope"]), 2)
             self.assertEqual(subprocess.call([sys.executable, str(project / "workflow.py"), "report"]), 0)
 
-    def test_module_docs_are_untouched_by_reporting(self):
+    def test_module_docs_are_bound_to_the_project_and_their_logs_track_it(self):
         with tempfile.TemporaryDirectory() as temp:
             project = self.generate(Path(temp), "rna")
             module_docs = [path for path in sorted((project / "Scripts").rglob("*.md"))]
             self.assertTrue(module_docs)
-            before = {path: path.read_bytes() for path in module_docs}
+            # Generation binds every stage document to this project exactly once.
+            for path in module_docs:
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(STAGE_CONTEXT_START), 1, str(path))
+                self.assertEqual(text.count(STAGE_CONTEXT_END), 1, str(path))
+                self.assertNotIn("Notebooks/<notebook>.ipynb", text, str(path))
+            self.assertEqual(module_docs[0].read_text(encoding="utf-8").count(STAGE_CONTEXT_START), 1)
             subprocess.check_call([sys.executable, str(ROOT / "scripts/plan_workflow.py"),
                                    "--project", str(project), "--routes", "auto", "--run-id", "unit"])
             subprocess.check_call([sys.executable, str(ROOT / "scripts/submit_workflow.py"),
@@ -787,10 +799,123 @@ class SkillTests(unittest.TestCase):
                                    "--project", str(project), "--run-id", "unit"])
             subprocess.check_call([sys.executable, str(ROOT / "scripts/update_report.py"),
                                    "--project", str(project)])
-            # The module documents are static reference material: only the two
-            # root documents are owned by generation and by the run log.
-            for path, content in before.items():
-                self.assertEqual(path.read_bytes(), content, str(path))
+            scanpy = project / "Scripts" / "Scanpy" / "Report.md"
+            methscan = project / "Scripts" / "Methscan" / "Report.md"
+            readme = project / "Scripts" / "Scanpy" / "README.md"
+            # The stage this run touched recorded it; an RNA-only run leaves the
+            # methylation stages alone rather than padding them with a record
+            # that says nothing about them.
+            self.assertIn("<!-- SCMO-RUN:unit:START -->", scanpy.read_text(encoding="utf-8"))
+            self.assertNotIn("<!-- SCMO-RUN:unit:START -->", methscan.read_text(encoding="utf-8"))
+            # The stage README is generated-once text and no run rewrites it.
+            self.assertIn(STAGE_CONTEXT_START, readme.read_text(encoding="utf-8"))
+            before = readme.read_bytes()
+            subprocess.check_call([sys.executable, str(ROOT / "scripts/update_report.py"),
+                                   "--project", str(project)])
+            self.assertEqual(readme.read_bytes(), before)
+            # The stage record and the root record are the same run: one corpus of
+            # summaries rendered twice, so they cannot disagree about it.
+            root = (project / "Report.md").read_text(encoding="utf-8")
+            for text in (root, scanpy.read_text(encoding="utf-8")):
+                self.assertIn("<!-- SCMO-RUN:unit:START -->", text)
+                self.assertIn("`unit` — complete", text)
+
+    def test_stage_routing_names_every_task_that_has_a_home(self):
+        expected = {
+            "scanpy": "Scanpy",
+            "methscan_select_convert": "Methscan", "methscan_prepare": "Methscan",
+            "methscan_filter": "Methscan", "methscan_smooth": "Methscan",
+            "methscan_pairwise_dmr": "Methscan", "methscan_hypo_heatmaps": "Methscan",
+            "methscan_pooled_dmr": "Methscan",
+            "methscan_vmr_0.05": "Methscan",
+            "allcools_features": "Methylvi/allcools",
+            "methylvi_allcools_1000": "Methylvi/allcools",
+            "methylvi_vmr_features_0.05": "Methylvi",
+            "methylvi_vmr_0.05_1000": "Methylvi",
+            "pooled_dmr_prepare": "Methylvi/vmr_dmr", "pooled_dmr_counts": "Methylvi/vmr_dmr",
+            "methylvi_vmr_dmr_0.05_1000": "Methylvi/vmr_dmr",
+        }
+        for task_id, stage in expected.items():
+            self.assertEqual(stage_for_task(task_id), stage, task_id)
+        # The run-level summary is unowned: it would otherwise appear in every
+        # stage log as though each stage had run it.
+        for task_id in ("workflow_summary", "task_0", "", None):
+            self.assertIsNone(stage_for_task(task_id), repr(task_id))
+        # Prefix order: the DMR trainers must not fall through to the broader
+        # `methylvi_vmr_` prefix, which would file them under the wrong report.
+        self.assertEqual(stage_for_task("methylvi_vmr_dmr_0.01_2000"), "Methylvi/vmr_dmr")
+
+    def test_stage_log_counts_only_its_own_tasks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            self.record_run(
+                project, "unit", "2026-09-19T08:00:00+00:00",
+                [("complete", True), ("complete", True), ("complete", True)],
+                task_names=["scanpy", "methscan_prepare", "workflow_summary"],
+            )
+            outcome = refresh_stage_run_logs(project)
+            by_stage = {row["stage"]: row for row in outcome["stages"]}
+            self.assertTrue(by_stage["Scanpy"]["written"])
+            scanpy = (project / "Scripts" / "Scanpy" / "Report.md").read_text(encoding="utf-8")
+            methscan = (project / "Scripts" / "Methscan" / "Report.md").read_text(encoding="utf-8")
+            # One task each, not the run's three: the stage view is filtered, and
+            # the unowned summary task appears in neither.
+            self.assertIn("- Tasks / 任务：1/1 complete, 0 failed, 0 unfinished", scanpy)
+            self.assertIn("- Tasks / 任务：1/1 complete, 0 failed, 0 unfinished", methscan)
+            self.assertNotIn("workflow_summary", scanpy)
+            self.assertNotIn("workflow_summary", methscan)
+
+    def test_stage_log_carries_the_stage_verdict_not_the_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            # The run as a whole is unfinished, but Scanpy itself is complete;
+            # reporting the run's status in the Scanpy report would let it read
+            # `complete` while its own task failed, or the reverse here.
+            self.record_run(
+                project, "unit", "2026-09-19T08:00:00+00:00",
+                [("complete", True), ("PENDING", False)],
+                task_names=["scanpy", "methscan_prepare"],
+            )
+            refresh_stage_run_logs(project)
+            scanpy = (project / "Scripts" / "Scanpy" / "Report.md").read_text(encoding="utf-8")
+            methscan = (project / "Scripts" / "Methscan" / "Report.md").read_text(encoding="utf-8")
+            self.assertIn("`unit` — complete", scanpy)
+            self.assertIn("`unit` — unfinished", methscan)
+
+    def test_stage_context_block_binds_the_documents_to_the_project(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            readme = (project / "Scripts" / "Scanpy" / "README.md").read_text(encoding="utf-8")
+            # What generation knows about this project, and the entry it ships.
+            self.assertIn("`fixture`", readme)
+            self.assertIn("`S1`", readme)
+            self.assertIn("`Notebooks/scanpy_workflow.ipynb`", readme)
+            # And what it deliberately does not claim: the template's own worked
+            # numbers stay labelled as the reference project's, because rewriting
+            # them into statements about this project would invent evidence.
+            self.assertIn("belong to the reference project", readme)
+            # Re-running generation over an existing tree is a no-op, so a
+            # half-generated project converges instead of accumulating banners.
+            before = readme.encode("utf-8")
+            adapt_stage_docs(project, "fixture", "human", "fixture-build", ["S1", "S2"],
+                             packaged_notebook(project))
+            self.assertEqual(readme.encode("utf-8"), before)
+
+    def test_environment_report_keeps_the_generated_regions_across_a_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "paired")
+            report = project / "Scripts" / "Environment" / "Report.md"
+            self.assertIn(STAGE_CONTEXT_START, report.read_text(encoding="utf-8"))
+            # This report is a whole-file snapshot of provisioning state, so the
+            # context block has to survive the rewrite rather than be clobbered.
+            environment_bootstrap.write_environment_report(project, {
+                "status": "ok", "mode": "discover", "manager": "conda",
+                "created_at": "2026-09-20T00:00:00+00:00",
+                "actions": [{"profile": "orchestrator", "action": "reuse", "prefix": "/envs/x"}],
+            })
+            text = report.read_text(encoding="utf-8")
+            self.assertEqual(text.count(STAGE_CONTEXT_START), 1)
+            self.assertIn("`orchestrator`", text)
 
     def test_sample_include_agrees_with_loader(self):
         with tempfile.TemporaryDirectory() as temp:

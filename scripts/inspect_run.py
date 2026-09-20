@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _common import (
-    TERMINAL_BAD_STATES, WorkflowError, refresh_run_log, signature,
+    TERMINAL_BAD_STATES, WorkflowError, refresh_run_log, refresh_stage_run_logs, signature,
     validate_recorded_outputs, write_json,
 )
 
@@ -126,27 +126,41 @@ def inspect(project: Path, run_id: str) -> dict:
     return result
 
 
+def _warn_unwritable(project: Path, exc: Exception) -> None:
+    print(
+        "WARNING: could not update the report log under %s: %s\n"
+        "         recover with: python tools/update_report.py --project %s"
+        % (project, exc, project),
+        file=sys.stderr,
+    )
+
+
 def _refresh_docs(project: Path) -> None:
-    """Record this run in the root Report.md, best effort.
+    """Record this run in the root and per-stage Reports, best effort.
 
     The exit code encodes the state of the run, not of a derived document: a
     read-only checkout or a full disk must not turn a validated run into a
     reported failure. update_report.py is the loud path, and it does exit
     non-zero when the document cannot be written, so a failure is never silent
     to someone who wants it to be fatal.
+
+    The two refreshes are attempted independently so that a stage report left
+    read-only cannot cost the root log its record, or the other way round.
     """
     try:
         outcome = refresh_run_log(project)
     except (WorkflowError, OSError, ValueError) as exc:
-        print(
-            "WARNING: could not update %s: %s\n"
-            "         recover with: python tools/update_report.py --project %s"
-            % (project / "Report.md", exc, project),
-            file=sys.stderr,
-        )
-        return
-    for warning in outcome.get("warnings") or []:
-        print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
+        _warn_unwritable(project, exc)
+    else:
+        for warning in outcome.get("warnings") or []:
+            print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
+    try:
+        stage_outcome = refresh_stage_run_logs(project)
+    except (WorkflowError, OSError, ValueError) as exc:
+        _warn_unwritable(project, exc)
+    else:
+        for warning in stage_outcome.get("warnings") or []:
+            print("WARNING: run summary not readable: %s" % warning, file=sys.stderr)
 
 
 def main() -> int:

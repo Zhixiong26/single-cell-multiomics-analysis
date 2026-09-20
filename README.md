@@ -278,9 +278,9 @@ Scanpy、MethSCAn、ALLCools 和 MethylVI 均有内置执行适配器，并自�
   --project "$PROJECT"
 ```
 
-`inspect_run.py` 在给出运行结论的同时，会把本次 run 的精简记录写入根 `Report.md` 的运行记录区域，因此**多次迭代会累积**而不是互相覆盖；重跑同一 run 会就地更新它自己的记录。这条写入是尽力而为：失败只打印 stderr 警告并附上恢复命令，不改变 run 的退出码。`update_report.py` 是显式路径，写不进去就非零退出；不带 `--run-id` 时从 `.workflow/runs/*/run_summary.json` 全量重建（`--run-id` 只用于要求该 run 必须存在）。
+`inspect_run.py` 在给出运行结论的同时，会把本次 run 的精简记录写入根 `Report.md` 的运行记录区域，因此**多次迭代会累积**而不是互相覆盖；重跑同一 run 会就地更新它自己的记录。同一条记录也会写入本次 run 触及的每个阶段 Report（`Scripts/Scanpy/Report.md` 等）各自的运行记录区域，内容是同一份 summary 按该阶段的任务过滤后的视图 —— 根日志始终是完整记录。这条写入是尽力而为：失败只打印 stderr 警告并附上恢复命令，不改变 run 的退出码。`update_report.py` 是显式路径，写不进去就非零退出；不带 `--run-id` 时从 `.workflow/runs/*/run_summary.json` 全量重建根日志与全部阶段日志（`--run-id` 只用于要求该 run 必须存在）。
 
-根 `README.md` 由 `init_project.py` 依据 intake 与配置**写入一次后冻结**，不反映进度或结果；`Scripts/<Module>/` 下的模块 README/Report 是静态参考资料，运行不会更新它们。
+根 `README.md` 由 `init_project.py` 依据 intake 与配置**写入一次后冻结**，不反映进度或结果；`Scripts/<Module>/` 下的模块 README 与 Report 正文同样由生成时**一次写入**——`init_project.py` 会在每个阶段文档顶部写入一段标明本项目（项目名、物种、基因组、实际样本、notebook 入口）的上下文块，并把 `<notebook>` 占位符解析为本项目实际入口。阶段 Report 正文中出现的示例样本名与实测数值属于参考项目，由该上下文块明确标注；运行只写入其运行记录区域，不改写正文。
 
 每次运行的证据位于：
 
@@ -315,6 +315,8 @@ Scanpy 给出的 cell type 是**候选**；依赖 cell type 的 DMR 路线只有
 ```
 
 工具会把该 run 的 `analysis_signature` 与聚类集合一起写进 profile（默认 `config/annotation.yaml`，或 `annotation.profile` 指定的路径），因此改过 `leiden.resolution` 或换了数据后旧 profile 自动失效——**重新审核**，不要把映射搬过去。占位标签（`NA`、`Unassigned`、`requires_review` 等）、覆盖不全的审核表、以及会被覆盖的既有审核表都会被拒绝。记录后还需在 `config/project.yaml` 里设置 `annotation.profile`，并把 `annotation.review_status` 改为 `approved`；两者齐备 DMR 路线才会被规划。
+
+**注释在产出它的那一轮里完成，不停在 `Unassigned`。** candidate 运行的作用是产出证据（逐 cluster 的排名 marker、marker 图、QC），判定标签是同一轮的下一步：读该轮自己的 marker 证据定出每个 cluster 的 cell type，写进 `markers.dotplot_markers` 与 `markers.cell_type_order`，再用上面的工具记录，然后以 `baseline` 重跑。skill 不内置 marker 面板、也不提供对照表——沿用别的项目的标签正是这套流程要避免的移植。标签定下来后，交付的点图是 baseline 的 `annotation_marker_dotplot.png`：**每行一个细胞类型、样本合并在行内**；candidate 那张纵轴为 cluster 的 `candidate_cluster_marker_dotplot.png` 是判定时读的证据，会被它取代。最后请用户确认注释，说明哪些 cluster 已确定、哪些不确定。详见 [Scanpy 与 Harmony](references/scanpy.md)。
 
 ### 10. 测试
 
@@ -435,7 +437,7 @@ The template also ships standalone `run_*.sbatch` and `submit_*.sh` wrappers tha
 
 - Skill-level references: [configuration](references/configuration.md), [environments](references/environments.md), [Scanpy](references/scanpy.md), [MethSCAn](references/methscan.md), [ALLCools and MethylVI](references/methylvi.md), [execution](references/execution.md), [troubleshooting](references/troubleshooting.md), [documentation](references/documentation.md), [template maintenance](references/template-maintenance.md).
 - The project root carries `README.md` — the stable contract, written once at generation and frozen — and `Report.md`, which accumulates one concise record per run in a tool-owned region (format in [documentation](references/documentation.md)).
-- Every packaged module also carries its own bilingual README and evidence ledger, generated with the project: `Scripts/Scanpy/`, `Scripts/Methscan/`, `Scripts/Methylvi/` (plus `allcools/`, `vmr/`, `vmr_dmr/`, `shared/`), and `Scripts/Environment/`. These are static reference material; a run never updates them.
+- Every packaged module also carries its own bilingual README and evidence ledger, generated with the project: `Scripts/Scanpy/`, `Scripts/Methscan/`, `Scripts/Methylvi/` (plus `allcools/`, `vmr/`, `vmr_dmr/`, `shared/`), and `Scripts/Environment/`. Generation writes each one once, adding a context block that names this project, its organism, genome, actual samples and notebook entry; the prose below it — including the reference project's example sample names and worked numbers — is labelled as the reference project's and is never rewritten. The stage Report additionally carries its own run-log region, refreshed per run with that stage's tasks only, so a reader of `Scripts/Scanpy/Report.md` does not have to read the MethylVI runs around it.
 - `Supplementary/README.md` records the provenance and digests of the bundled reference files, and how to override them.
 - `Scripts/Scanpy/Notebooks/scanpy_workflow.ipynb` is the notebook the run DAG executes. `example_ipf_scanpy.ipynb` beside it is a complete worked example that is never executed; its reviewed cluster-to-cell-type mapping is valid only for that example's exact cluster set and must not be transplanted.
 
@@ -451,9 +453,9 @@ The template also ships standalone `run_*.sbatch` and `submit_*.sh` wrappers tha
   --project "$PROJECT"
 ```
 
-`inspect_run.py` records the run's verdict and, at the same time, refreshes that run's concise entry in the root `Report.md` run log, so successive iterations **accumulate** instead of overwriting each other; re-inspecting a run updates its own entry in place. That write is best effort: a failure prints a stderr warning with the recovery command and leaves the run's exit code untouched. `update_report.py` is the loud path and exits non-zero when it cannot write; without `--run-id` it rebuilds the whole log from `.workflow/runs/*/run_summary.json` (`--run-id` only requires that one run to exist).
+`inspect_run.py` records the run's verdict and, at the same time, refreshes that run's concise entry in the root `Report.md` run log, so successive iterations **accumulate** instead of overwriting each other; re-inspecting a run updates its own entry in place. The same entry also goes into the run-log region of every stage Report the run touched, filtered to that stage's tasks — a per-stage view of one corpus of summaries, not a second source of truth. That write is best effort: a failure prints a stderr warning with the recovery command and leaves the run's exit code untouched. `update_report.py` is the loud path and exits non-zero when it cannot write; without `--run-id` it rebuilds the root log and every stage log from `.workflow/runs/*/run_summary.json` (`--run-id` only requires that one run to exist).
 
-The root `README.md` is written once by `init_project.py` from the intake and configuration and is **frozen** afterwards: it reports no progress and no results. The module README/Report files under `Scripts/<Module>/` are static reference material and are never updated by a run.
+The root `README.md` is written once by `init_project.py` from the intake and configuration and is **frozen** afterwards: it reports no progress and no results. The module READMEs and the prose of the module Reports under `Scripts/<Module>/` are written once at generation too, each carrying a generated context block naming this project, its organism, genome, actual samples and notebook entry. The example sample names and measured numbers in that prose belong to the reference project and are labelled as such; rewriting them into statements about this project would fabricate evidence. Only the stage Reports' run-log regions are updated by a run.
 
 A run is complete only when validated outputs, signatures, machine-readable summaries, and completion markers agree. Slurm submission or a `COMPLETED` scheduler state alone is not sufficient.
 
@@ -472,5 +474,7 @@ Scanpy's cell types are **proposals**. The cell-type DMR routes are planned only
 ```
 
 The tool writes the run's `analysis_signature` and cluster set into the profile alongside the labels (to `config/annotation.yaml`, or to `annotation.profile` if it names a path), so a profile recorded for one set of parameters cannot be reused after `leiden.resolution` changes or the data is re-run — review again instead of transplanting the mapping. Placeholder labels (`NA`, `Unassigned`, `requires_review`, and similar), a worksheet that does not cover the run's clusters exactly, and an existing worksheet it would overwrite are all refused. Recording is not enough on its own: set `annotation.profile` in `config/project.yaml` and set `annotation.review_status` to `approved`, and only then do the DMR routes become plannable.
+
+**The first pass annotates; it does not stop at `Unassigned`.** A candidate run exists to produce the evidence — per-cluster ranked markers, the marker figure, QC — and deciding the labels from it is the next step of the same pass: read that run's own marker evidence, settle a cell type per cluster, write the labels into `markers.dotplot_markers` and `markers.cell_type_order`, record them with the tool above, and re-run as `baseline`. No marker panel ships with the skill and there is no crosswalk to consult, because carrying another project's labels over is the transplant this workflow exists to prevent. Once the labels are recorded, the dotplot that ships is the baseline's `annotation_marker_dotplot.png` — **one row per cell type, samples pooled inside each row**; the candidate's `candidate_cluster_marker_dotplot.png`, whose rows are Leiden clusters, was the evidence read while deciding and is superseded by it. Close by asking the user to confirm the annotation, naming the clusters you consider settled and the ones you do not. See [Scanpy and Harmony](references/scanpy.md).
 
 See the linked references above for configuration, route-specific behavior, resource selection, troubleshooting, and evidence contracts.

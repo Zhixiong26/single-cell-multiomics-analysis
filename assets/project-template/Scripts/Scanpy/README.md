@@ -163,8 +163,10 @@ Notebook 把基础 QC 判定写入 `obs['pass_basic_qc']`，记录各 cohort 过
 
 ### 9. Annotation plots and targeted review / 注释图与专项复核
 
-- Draw the global cell-type marker dotplot from `adata.raw`; dot size encodes the expressing fraction and colour the mean expression.
-  从 `adata.raw` 绘制全局 cell-type marker dotplot；点大小表示表达比例，颜色表示平均表达。
+- Draw the global cell-type marker dotplot from `adata.raw`; dot size encodes the expressing fraction and colour the mean expression. Its rows are cell types, one per group of the declared panel, with the clusters already merged into them — not clusters, and never samples. Samples are pooled into each row; a per-sample view is a cohort QC figure, not this one.
+  从 `adata.raw` 绘制全局 cell-type marker dotplot；点大小表示表达比例，颜色表示平均表达。其纵轴是细胞类型，与声明面板的分组一一对应，cluster 已合并到其中——不是 cluster，也绝不是样本。样本被合并在每一行内；分样本视图属于 cohort QC 图，不是这张图。
+- Which of the two dotplots exists follows from the annotation state. A reviewed baseline writes `annotation_marker_dotplot.png` with one row per cell type. A candidate run with a declared panel writes `candidate_annotation_marker_dotplot.png`, the same rows carrying proposed labels. A candidate run with no panel falls back to `candidate_cluster_marker_dotplot.png`, whose rows are the Leiden clusters — that figure is this round's marker evidence for deciding the labels, and it is not the deliverable; the cell-type dotplot replaces it as soon as the labels are recorded and the baseline re-run.
+  存在哪一张点图由注释状态决定。已审核 baseline 写出 `annotation_marker_dotplot.png`，每行一个细胞类型。声明了面板的 candidate 写出 `candidate_annotation_marker_dotplot.png`，纵轴相同、标签为候选。未声明面板的 candidate 退回 `candidate_cluster_marker_dotplot.png`，纵轴为本轮 Leiden cluster——该图是本轮判定标签的 marker 证据，不是交付物；标签一经记录并重跑 baseline，即由 cell-type 点图取代。
 - Draw marker dotplots for the epithelial and rare clusters separately, and summarize the rare populations' cell counts, QC, doublet score and cohort composition.
   单独绘制上皮相关 cluster 和稀有 cluster 的 marker dotplot，并汇总稀有群的细胞数、QC、doublet score 和 cohort 构成。
 - Generate Leiden, cell-type, sample and QC UMAPs on the post-Harmony coordinates; generate the group UMAP only when a verified `obs['group']` exists.
@@ -235,7 +237,32 @@ A historical baseline can only be used to detect differences; it is not a substi
 
 历史基线只能用于发现差异，不能替代本轮验证。
 
-### 4. Final annotation UMAP and parameter self-iteration / 最终注释 UMAP 与参数自迭代
+### 4. Annotate every cluster / 注释每个 cluster
+
+A candidate run that still reads `Unassigned` has produced the evidence, not the annotation. Stop there only in order to annotate — never in order to hand the clusters to someone else. Derive each cluster's identity in this same pass.
+
+candidate 运行结束时若仍为 `Unassigned`，说明它产出的是证据而非注释。在此停留只为完成注释，不是把 cluster 交给他人：本轮就要确定每个 cluster 的身份。
+
+- Read `tables/candidate_annotation_audit.tsv` together with the marker figures. The table carries each cluster's size, `top1`/`top2`, score margin and Top10 ranked markers.
+  结合 marker 图阅读 `tables/candidate_annotation_audit.tsv`：其中含逐 cluster 的细胞数、`top1`/`top2`、score margin 和 Top10 ranked marker。
+- Establish one cell type per cluster by looking the ranked markers up as you go: canonical lineage markers first, then the cluster's QC, sample composition and neighbourhood as corroboration. There is no bundled marker panel and no crosswalk to consult — a label has to be defensible from this run's own markers.
+  通过实时查询 ranked marker 为每个 cluster 确定一个 cell type：先看经典谱系 marker，再用该 cluster 的 QC、样本构成和邻域佐证。没有内置 marker 面板、也没有可查的对照表 —— 标签必须能由本轮自身的 marker 支撑。
+- Write the settled labels into `markers.dotplot_markers` and `markers.cell_type_order` in `config/analysis.yaml`, one group per label, so the dotplot, the ordered legend and the recorded mapping all name the same set. `markers.*` is outside the analysis signature, so adding panels does not invalidate the candidate run.
+  将确定的标签写入 `config/analysis.yaml` 的 `markers.dotplot_markers` 与 `markers.cell_type_order`，每个标签一组，使 dotplot、顺序图例与记录的映射指向同一集合。`markers.*` 不属于分析签名，因此新增面板不会使 candidate 运行失效。
+- Record the mapping with `tools/record_annotation_review.py`（`--worksheet` 生成工作表，`--mapping` 将完成的映射记入 `config/annotation.yaml`）。占位标签会被拒绝：无法判定的 cluster 在工作表和结论中显式标注为低置信或不明确，不得用占位符或臆造标签填充。
+  Record the mapping with `tools/record_annotation_review.py` (`--worksheet` writes the reviewer worksheet, `--mapping` records a completed one into `config/annotation.yaml`). Placeholder labels are rejected by design: a cluster that cannot be called is marked explicitly as low-confidence or ambiguous in the worksheet and in the conclusion, never filled with a placeholder or an invented label.
+- Re-run as `baseline` with `ANALYSIS_CONFIRMED` enabled, so the formal outputs carry `cell_type`, the reviewed annotation dotplot and the reviewed annotation UMAP.
+  以 `baseline` 并启用 `ANALYSIS_CONFIRMED` 重跑，使正式输出使用 `cell_type`、经审核的注释 dotplot 和注释 UMAP。
+- The dotplot that ships is that baseline's `annotation_marker_dotplot.png`, with one row per cell type and the samples pooled inside each row. The candidate's `candidate_cluster_marker_dotplot.png` — rows are Leiden clusters — is the evidence this step reads, and it is superseded, not delivered. Leaving it as the only dotplot is the same unfinished state as leaving the labels at `Unassigned`.
+  交付的点图是 baseline 的 `annotation_marker_dotplot.png`：每行一个细胞类型，样本合并在行内。candidate 的 `candidate_cluster_marker_dotplot.png`（纵轴为 Leiden cluster）是本步骤所读的证据，会被取代而非交付。只留下它，与把标签停在 `Unassigned` 是同一种未完成状态。
+- Ask the user to confirm the annotation before treating the round as closed: name the clusters you consider settled and the ones you consider uncertain, and the markers behind each. A user correction is recorded and re-run; a correction that changes the cluster set is a new candidate run under a new `ITERATION_ID`.
+  在把本轮视为结束前，请用户确认注释：说明哪些 cluster 已确定、哪些不确定，以及各自的依据 marker。用户的修正需记录并重跑；若修正改变了 cluster 集合，则是一次带新 `ITERATION_ID` 的 candidate 运行。
+
+Placeholder labels (`NA`, `Unassigned`, `requires_review`) stay invalid for cell-type DMR, so an uncalled cluster has to be resolved rather than parked.
+
+占位标签（`NA`、`Unassigned`、`requires_review`）在 cell-type DMR 中始终无效，因此未能判定的 cluster 必须解决，不能搁置。
+
+### 5. Final annotation UMAP and parameter self-iteration / 最终注释 UMAP 与参数自迭代
 
 After the preliminary annotation is complete, the final `cell_type` UMAP must be inspected — do not stop at "the code raised no error" or "the label table is complete". At minimum check:
 
@@ -278,7 +305,7 @@ Parameter optimization is considered converged when: the final annotation UMAP h
 
 参数优化在以下情况视为收敛：最终注释 UMAP 没有可由参数修正的明显结构问题；marker 与邻域证据一致；连续两轮候选均未带来实质改善；或继续调整只改变视觉布局而不改善分析证据。
 
-### 5. Diagnosis and narrow correction / 诊断与窄修正
+### 6. Diagnosis and narrow correction / 诊断与窄修正
 
 On failure, first preserve the original error and the minimal reproduction evidence, then classify it:
 
@@ -294,7 +321,7 @@ Fix only the minimal scope that direct evidence supports, then re-execute from b
 
 每次只修正有直接证据支持的最小范围，然后从受影响步骤之前重新执行，并复查全部下游不变量。PCA、Harmony、邻接图、UMAP 和 Leiden 参数可按上一节授权自主迭代；若修正需要改变其他 canonical Notebook 逻辑、覆盖正式数据或改变缺少证据支持的生物学判定，先停止并请求用户授权。
 
-### 6. Recording and stop conditions / 记录与停止条件
+### 7. Recording and stop conditions / 记录与停止条件
 
 At the end of every round, record the evidence, the conclusion and the next step in `Report.md`. Stop the automatic iteration and hand the decision to the user as soon as any of the following holds:
 
@@ -314,7 +341,10 @@ Only when all of the following hold may the report be written as "pass":
 只有同时满足以下条件，才可在报告中写为“通过”：
 
 - Execution, structure, analysis, annotation and output verification all have evidence, and the final annotation UMAP has completed its plausibility review and the necessary parameter iterations. 执行、结构、分析、注释和输出五层验证均有证据，最终注释 UMAP 已完成合理性审查和必要的参数迭代。
-- Every actual cluster has been reviewed on the basis of this round's results. 所有实际 cluster 已基于本轮结果审核。
+- Every actual cluster carries a cell type established from this round's own marker evidence, recorded in `config/annotation.yaml`, and the user has been asked to confirm the labels that are settled and the ones that are not. No cluster rests at a placeholder label.
+  所有实际 cluster 均已基于本轮自身的 marker 证据确定 cell type 并记入 `config/annotation.yaml`，且已请用户确认哪些标签已确定、哪些未确定。没有任何 cluster 停留在占位标签上。
+- The delivered annotation dotplot has one row per cell type with the samples pooled into it; a per-cluster dotplot standing in for it means the annotation step did not finish.
+  交付的注释点图每行一个细胞类型、样本合并在行内；若以逐 cluster 点图代替，说明注释步骤尚未完成。
 - The save behaviour matches the explicit intent of `ANALYSIS_CONFIRMED` and `OVERWRITE_DATA_OUTPUTS`. 保存行为符合 `ANALYSIS_CONFIRMED` 和 `OVERWRITE_DATA_OUTPUTS` 的明确意图。
 - Machine-readable outputs agree with the notebook's state in this round. 机器可读输出与 Notebook 本轮状态一致。
 - `Report.md` records this round's inputs, code identity, results, differences and unresolved risks. `Report.md` 已记录本轮输入、代码身份、结果、差异和未决风险。

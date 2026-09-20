@@ -15,7 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from _common import WorkflowError, load_samples, project_files, write_json
+from _common import (
+    RUNLOG_END, RUNLOG_START, STAGE_CONTEXT_END, STAGE_CONTEXT_START, WorkflowError, load_samples,
+    marked_region, project_files, write_json,
+)
 
 
 PROFILE_ORDER = ("analysis_core", "methscan", "methylvi")
@@ -160,13 +163,32 @@ def write_environment_rows(project: Path, rows: List[Dict[str, str]]) -> None:
 
 def write_environment_report(project: Path, result: Dict[str, Any]) -> None:
     lines = [
-        "# Environment report / 环境报告", "",
+        "# Environment report / 环境报告",
+    ]
+    path = Path(project) / "Scripts" / "Environment" / "Report.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # This report is a snapshot of the current provisioning state, so it is
+    # rewritten whole rather than accumulated. Two generated regions survive that
+    # rewrite: the context block naming the project, and a run-log region if the
+    # project has one. Neither is this tool's to invent or to discard.
+    existing = ""
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+    context = marked_region(existing, STAGE_CONTEXT_START, STAGE_CONTEXT_END)
+    run_log = marked_region(existing, RUNLOG_START, RUNLOG_END)
+    if context:
+        lines.extend(["", context])
+    lines.extend([
+        "",
         "- Status / 状态: `%s`" % result["status"],
         "- Mode / 模式: `%s`" % result["mode"],
         "- Manager / 管理器: `%s`" % result["manager"],
         "- Timestamp / 时间: `%s`" % result["created_at"], "",
         "| Profile | Action | Prefix |", "|---|---|---|",
-    ]
+    ])
     for action in result["actions"]:
         lines.append("| `%s` | `%s` | `%s` |" % (
             action["profile"], action["action"], action["prefix"].replace("|", "\\|"),
@@ -175,9 +197,9 @@ def write_environment_report(project: Path, result: Dict[str, Any]) -> None:
         "", "Existing compatible environments were reused read-only; created environments are isolated.",
         "兼容的已有环境仅只读复用；新建环境均为隔离环境。", "",
     ])
-    path = Path(project) / "Scripts" / "Environment" / "Report.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    if run_log:
+        lines.extend([run_log, ""])
+    path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
 
 
 def bootstrap(

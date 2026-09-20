@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from _common import (
-    DATA_ROOT_NAME, RUNLOG_NOTE, RUNLOG_TITLE, SAMPLE_COLUMNS, WorkflowError, apply_data_sources,
-    as_bool, data_sources, git_commit, load_structured, outside_project, plan_data_sources,
-    render_run_log_region, resolve_path, write_json,
+    DATA_ROOT_NAME, RUNLOG_NOTE, RUNLOG_START, RUNLOG_TITLE, SAMPLE_COLUMNS, STAGE_CONTEXT_END,
+    STAGE_CONTEXT_START, STAGE_REPORTS, WorkflowError, apply_data_sources, as_bool, data_sources,
+    git_commit, load_structured, outside_project, plan_data_sources, render_run_log_region,
+    resolve_path, write_json,
 )
 
 
@@ -511,6 +512,116 @@ def bilingual_report(project_id: str, provenance: Dict[str, Any], data_rows=None
     return "\n\n".join(parts) + "\n"
 
 
+# --- packaged stage documents -------------------------------------------------
+#
+# The stage READMEs and Reports are bilingual contracts ported verbatim from the
+# reference project. Their prose keeps that project's example sample names on
+# purpose: the figures printed beside those names are that project's measured
+# values, and rewriting them into statements about different data would fabricate
+# evidence. What generation can honestly do is say which project this copy
+# belongs to, so a reader never has to guess whether `CYL`/`ZCP` are examples or
+# their own samples. This block is that statement, written once and never
+# rewritten by a run, and the stage Reports additionally start with an empty run
+# log that every later inspection fills in.
+
+STAGE_RUNLOG_NOTE = (
+    "_This file accumulates one concise record per run that touched this stage. Re-inspecting "
+    "a run updates its record in place; everything above the region is human text and is never "
+    "rewritten. The root `Report.md` holds the same records for every stage together. / "
+    "本文件为该阶段每次运行累积一条精简记录；重跑同一 run 会就地更新其记录，区域上方为人类文本、"
+    "不会被改写。根目录 `Report.md` 汇总全部阶段的相同记录。_"
+)
+
+
+def packaged_notebook(output: Path) -> str:
+    """The stem of the notebook this project runs, from the packaged manifest.
+
+    The manifest is the one place that declares which notebook is the entry, so
+    reading it keeps the documents and the runner from drifting apart if the
+    template notebook is ever renamed.
+    """
+    manifest = output / "Scripts" / "Scanpy" / "Notebooks" / "scanpy_template_manifest.json"
+    try:
+        configured = str(json.loads(manifest.read_text(encoding="utf-8")).get("template") or "")
+    except (OSError, ValueError, TypeError):
+        return "scanpy_workflow"
+    return configured[:-6] if configured.endswith(".ipynb") else (configured or "scanpy_workflow")
+
+
+def stage_context_block(project_id: str, organism: Any, genome_id: Any, labels: Sequence[str],
+                        notebook: str) -> str:
+    """The generated header naming what this project actually is."""
+    facts = [
+        "- 项目 / Project: `%s`" % project_id,
+        "- 物种 / Organism: %s" % (_cell(organism) if organism else "—"),
+        "- 基因组 / Genome: `%s`" % (genome_id if genome_id else "—"),
+    ]
+    if labels:
+        facts.append("- 样本 / Samples (%d): %s"
+                     % (len(labels), ", ".join("`%s`" % label for label in labels)))
+    if notebook:
+        facts.append("- Scanpy 入口 / Scanpy entry: `Notebooks/%s.ipynb`" % notebook)
+    lines = [STAGE_CONTEXT_START, "> **本项目上下文 / Project context**", ">"]
+    lines += ["> " + fact for fact in facts]
+    lines.append(">")
+    lines.append(
+        "> 本段由 `init_project.py` 生成一次，不随运行改写。"
+        + ("下文出现的 `CYL`/`ZCP` 等样本名属于参考项目，本项目的实际样本以上表为准。"
+           if labels else "")
+    )
+    lines.append(
+        "> Generated once by `init_project.py` and never rewritten by a run. "
+        + ("Sample names such as `CYL`/`ZCP` below belong to the reference project; this "
+           "project's own samples are the ones listed above."
+           if labels else "Numbers and figures below describe the reference project; this "
+           "project's own values are recorded in its run log.")
+    )
+    lines.append(STAGE_CONTEXT_END)
+    return "\n".join(lines)
+
+
+def adapt_stage_docs(output: Path, project_id: str, organism: Any, genome_id: Any,
+                     labels: Sequence[str], notebook: str) -> List[str]:
+    """Bind every packaged stage document to this project, once, at generation.
+
+    Two edits, both confined to what generation actually knows: the context block
+    above, and the `<notebook>` placeholder resolved to the notebook this project
+    ships. Idempotent, so re-running generation over an existing tree is safe.
+
+    Deliberately narrow. The stage documents are contracts ported from the
+    reference project, and their worked numbers are that project's measurements;
+    rewriting those into statements about this project would invent evidence. The
+    banner says whose numbers they are, and the run log below says what actually
+    happened here.
+    """
+    banner = stage_context_block(project_id, organism, genome_id, labels, notebook)
+    # Only reports a run actually writes get a run-log region. A region elsewhere
+    # would claim records nothing ever fills.
+    logged = {relative for _, relative in STAGE_REPORTS}
+    adapted: List[str] = []
+    for path in sorted((output / "Scripts").rglob("*.md")):
+        if path.name not in {"README.md", "Report.md"}:
+            continue
+        relative = path.relative_to(output).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if STAGE_CONTEXT_START in text:
+            continue
+        lines = text.splitlines()
+        # After the H1 when there is one, so the block reads as part of the header.
+        index = 1 if lines and lines[0].startswith("# ") else 0
+        text = "\n".join(lines[:index] + ["", banner] + lines[index:]).rstrip("\n") + "\n"
+        if notebook:
+            text = text.replace("Notebooks/<notebook>.ipynb", "Notebooks/%s.ipynb" % notebook)
+        if relative in logged and RUNLOG_START not in text:
+            # Seed an empty region so the first inspection appends into a placed
+            # region instead of bolting one onto the end of the document.
+            text = "\n".join([text.rstrip("\n"), "", STAGE_RUNLOG_NOTE, "", RUNLOG_TITLE, "",
+                              render_run_log_region([])]) + "\n"
+        path.write_text(text, encoding="utf-8")
+        adapted.append(relative)
+    return adapted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--intake", type=Path, required=True)
@@ -649,6 +760,17 @@ def main() -> int:
                          reference_notes, reference_warnings),
         encoding="utf-8",
     )
+    # After the root documents, so a stage document is never adapted before the
+    # project it describes exists. The stage READMEs and Reports are copied
+    # verbatim from the template; this is the one place that binds them to this
+    # project, and the per-stage run logs inside inspect_run.py keep them current
+    # from here on.
+    stage_labels = [str(sample.get("sample_id")) for sample in samples
+                    if isinstance(sample, dict) and as_bool(sample.get("include"))
+                    and str(sample.get("sample_id") or "").strip()]
+    adapt_stage_docs(output, project_id, project_cfg["project"].get("organism"),
+                     project_cfg["project"].get("genome_id"), stage_labels,
+                     packaged_notebook(output))
     write_json(output / ".workflow" / "template-lock.json", {
         "skill": "single-cell-multiomics-analysis", "skill_version": provenance["skill_version"],
         "skill_git_commit": provenance["skill_git_commit"], "schema_version": 1,

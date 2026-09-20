@@ -52,6 +52,96 @@ RUNLOG_FORMAT = 1
 LEGACY_RUN_STATE_START = "<!-- SCMO-RUN-STATE:START -->"
 LEGACY_RUN_STATE_END = "<!-- SCMO-RUN-STATE:END -->"
 
+# Stage reports. Each stage's Report.md accumulates the same run summaries as the
+# root Report, filtered to the tasks that stage owns, so a reader of the Scanpy
+# report does not have to read the MethylVI runs around it. The root Report stays
+# the complete record; these are per-stage views of one corpus of summaries, not
+# a second source of truth. Only reports a project already has are rewritten --
+# the file's human half is the stage's contract and cannot be invented here.
+STAGE_REPORTS = (
+    ("Scanpy", "Scripts/Scanpy/Report.md"),
+    ("Methscan", "Scripts/Methscan/Report.md"),
+    ("Methylvi/allcools", "Scripts/Methylvi/allcools/Report.md"),
+    ("Methylvi", "Scripts/Methylvi/Report.md"),
+    ("Methylvi/vmr_dmr", "Scripts/Methylvi/vmr_dmr/Report.md"),
+)
+
+# Which task belongs to which stage report. Prefix order matters: the
+# `methylvi_vmr_dmr_` trainers would otherwise match the broader `methylvi_vmr_`.
+STAGE_TASKS = {
+    "scanpy": "Scanpy",
+    "methscan_select_convert": "Methscan",
+    "methscan_prepare": "Methscan",
+    "methscan_filter": "Methscan",
+    "methscan_smooth": "Methscan",
+    "methscan_pairwise_dmr": "Methscan",
+    "methscan_hypo_heatmaps": "Methscan",
+    "methscan_pooled_dmr": "Methscan",
+    "allcools_features": "Methylvi/allcools",
+    "pooled_dmr_prepare": "Methylvi/vmr_dmr",
+    "pooled_dmr_counts": "Methylvi/vmr_dmr",
+}
+STAGE_TASK_PREFIXES = (
+    ("methscan_vmr_", "Methscan"),
+    ("methylvi_vmr_dmr_", "Methylvi/vmr_dmr"),
+    ("methylvi_vmr_", "Methylvi"),
+    ("methylvi_allcools_", "Methylvi/allcools"),
+)
+
+# The generated context block in every stage document. It names the project the
+# copy belongs to, so the reference project's example sample names and worked
+# numbers in the template prose are never mistaken for this project's own. It is
+# written once by init_project.py and preserved by every tool that rewrites part
+# of a stage document, including bootstrap_environments.py, whose report is a
+# whole-file snapshot rather than a run log.
+STAGE_CONTEXT_START = "<!-- SCMO-STAGE-CONTEXT:START -->"
+STAGE_CONTEXT_END = "<!-- SCMO-STAGE-CONTEXT:END -->"
+
+
+def marked_region(text: str, start: str, end: str) -> Optional[str]:
+    """The block from `start` through `end` inclusive, or None when either is absent.
+
+    Used to carry a region across a whole-file rewrite. Markers are matched as
+    they appear in the file rather than line-anchored, because these blocks are
+    written by a single producer and a partial match is a corrupt file that the
+    caller should leave alone rather than half-preserve.
+    """
+    begin = text.find(start)
+    if begin < 0:
+        return None
+    finish = text.find(end, begin + len(start))
+    if finish < 0:
+        return None
+    return text[begin:finish + len(end)]
+
+
+def stage_for_task(task_id: Any) -> Optional[str]:
+    """The stage report a task belongs to, or None when no stage owns it.
+
+    `workflow_summary` is deliberately unowned: it summarises the whole run and
+    would otherwise appear in every stage log as though each stage had run it.
+    """
+    text = str(task_id or "")
+    if text in STAGE_TASKS:
+        return STAGE_TASKS[text]
+    for prefix, stage in STAGE_TASK_PREFIXES:
+        if text.startswith(prefix):
+            return stage
+    return None
+
+
+def _stage_status(tasks: Sequence[Dict[str, Any]]) -> str:
+    """A stage's own verdict, from its tasks rather than from the run's status.
+
+    A run can complete every stage but one; reporting the run's status here would
+    let that stage's report read `complete` while its own task failed.
+    """
+    if any(str(row.get("state") or "") in TERMINAL_BAD_STATES for row in tasks):
+        return "failed"
+    if all(row.get("evidence_valid") for row in tasks):
+        return "complete"
+    return "unfinished"
+
 RUN_MARKER_RE = re.compile(r"^[ \t]*<!--[ \t]*SCMO-RUN:([^\s<>]+):(START|END)[ \t]*-->[ \t]*$")
 # Recognises only a whole line that is the region marker itself, so a run record
 # that merely mentions the marker in prose (or in backticks) is left alone.
@@ -638,11 +728,25 @@ def _parse_checked_at(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def run_record_lines(summary: Dict[str, Any]) -> List[str]:
-    """The concise per-run record: outcome, counts, and where the detail lives."""
+def run_record_lines(summary: Dict[str, Any], stage: Optional[str] = None) -> List[str]:
+    """The concise per-run record: outcome, counts, and where the detail lives.
+
+    With `stage`, only that stage's tasks are counted and the verdict is the
+    stage's own. An empty list means the run never touched the stage, which is
+    how a stage report leaves unrelated runs out instead of padding the log with
+    records that say nothing about it.
+    """
     run_id = str(summary.get("run_id") or "")
     status = str(summary.get("status") or "unknown")
     tasks = [row for row in (summary.get("tasks") or []) if isinstance(row, dict)]
+    if stage is not None:
+        # The summary written by inspect_run.py names the task `task`; older
+        # summaries and in-memory rows use `id`. Both are read so a stage log
+        # never silently drops a run it should have recorded.
+        tasks = [row for row in tasks if stage_for_task(row.get("task") or row.get("id")) == stage]
+        if not tasks:
+            return []
+        status = _stage_status(tasks)
     total = len(tasks)
     # Completion is proven by validated evidence, not by a scheduler state:
     # a not_submitted task and a marker-only task are both unfinished.
@@ -690,10 +794,13 @@ def _section(key: str, lines: List[str], index: int) -> Dict[str, Any]:
     return {"key": key, "lines": body, "run_id": run_id, "when": when, "index": index}
 
 
-def _section_from_summary(summary: Dict[str, Any], index: int) -> Dict[str, Any]:
-    key = report_run_key(summary.get("run_id") or "")
+def _section_from_summary(summary: Dict[str, Any], index: int,
+                          stage: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    lines = run_record_lines(summary, stage)
+    if not lines:
+        return None
     return {
-        "key": key, "lines": run_record_lines(summary),
+        "key": report_run_key(summary.get("run_id") or ""), "lines": lines,
         "run_id": str(summary.get("run_id") or ""),
         "when": _parse_checked_at(summary.get("checked_at")), "index": index,
     }
@@ -812,8 +919,15 @@ def _split_region(text: str) -> Tuple[str, str, str]:
     )
 
 
-def build_report_text(existing_text: str, summaries: Sequence[Dict[str, Any]]) -> str:
-    """The single renderer for the root Report.md. Pure: no filesystem access."""
+def build_report_text(existing_text: str, summaries: Sequence[Dict[str, Any]],
+                      stage: Optional[str] = None) -> str:
+    """The single renderer for a Report's run log. Pure: no filesystem access.
+
+    `stage` selects a stage view: the same summaries, filtered and counted per
+    stage. The root Report and every stage report therefore render through one
+    implementation, so a stage log is append-equal to the root log by
+    construction rather than by two code paths agreeing.
+    """
     migrated = _migrate_legacy(existing_text or "")
     # prefix and suffix are outside the region and belong to the human; only the
     # region's body is tool-owned and is rebuilt from scratch below.
@@ -823,8 +937,9 @@ def build_report_text(existing_text: str, summaries: Sequence[Dict[str, Any]]) -
     # union is what makes the log accumulate rather than derive from disk.
     sections = parse_run_sections(body)
     for index, summary in enumerate(summaries or []):
-        section = _section_from_summary(summary, index)
-        sections[section["key"]] = section
+        section = _section_from_summary(summary, index, stage)
+        if section is not None:
+            sections[section["key"]] = section
     rendered = render_run_log_region(list(sections.values()))
     # Blank lines are the one place a re-render could drift: the tail must lose
     # its trailing newlines too, or the next read of this file sees a different
@@ -885,3 +1000,35 @@ def refresh_run_log(root: Path) -> Dict[str, Any]:
         "warnings": warnings,
         "written": created or text != existing,
     }
+
+
+def refresh_stage_run_logs(root: Path) -> Dict[str, Any]:
+    """Re-render every stage Report.md that the project already has.
+
+    A stage report is a view of the same `.workflow/runs/*/run_summary.json` the
+    root log reads. Reports for stages this project never generated a document
+    for are skipped rather than created, because the human half of each file is
+    that stage's contract and cannot be reconstructed from summaries.
+    """
+    root = Path(root).resolve()
+    summaries, warnings = collect_run_summaries(root)
+    stages: List[Dict[str, Any]] = []
+    for stage, relative in STAGE_REPORTS:
+        report = root / relative
+        if not report.is_file():
+            continue
+        try:
+            existing = report.read_text(encoding="utf-8")
+        except OSError as exc:
+            warnings.append("%s is unreadable: %s" % (report, exc))
+            continue
+        text = build_report_text(existing, summaries, stage=stage)
+        if text != existing:
+            write_text_atomic(report, text)
+        stages.append({
+            "stage": stage,
+            "path": str(report),
+            "records": len(re.findall(r"<!-- SCMO-RUN:[^\s<>]+:START -->", text)),
+            "written": text != existing,
+        })
+    return {"stages": stages, "warnings": warnings}
