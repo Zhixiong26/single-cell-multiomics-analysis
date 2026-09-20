@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import itertools
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -18,21 +19,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# The suite drives local execution end to end, so it declares the host it emulates:
+# a single machine with no scheduler to submit to. Without this the same suite would
+# refuse to submit on a Slurm login node and pass on a workstation -- one suite, two
+# behaviours. Tests that need a different host declare it themselves for one call.
+os.environ.setdefault("SCMO_HOST_ROLE", "standalone")
+
 from _common import (LEGACY_RUN_STATE_END, LEGACY_RUN_STATE_START, RUN_KEY_SAFE_RE,
                      RUNLOG_EMPTY, RUNLOG_END, RUNLOG_START, STAGE_CONTEXT_END,
-                     STAGE_CONTEXT_START, WorkflowError,
-                     build_report_text, load_project, load_samples, load_structured,
-                     refresh_run_log, refresh_stage_run_logs, stage_for_task,
+                     STAGE_CONTEXT_START, STAGE_REPORTS, WorkflowError, available_partitions,
+                     build_report_text, effective_backend, host_role, host_role_source,
+                     load_project, load_samples, load_structured, login_execution_ack,
+                     refresh_run_log, refresh_stage_run_logs, slurm_allocation_id, stage_for_task,
+                     submit_host_execution_allowed,
                      report_run_key, task_is_implemented,
                      validate_recorded_outputs)  # noqa: E402
 import bootstrap_environments as environment_bootstrap  # noqa: E402
 from bootstrap_environments import bootstrap  # noqa: E402
-from init_project import adapt_stage_docs, packaged_notebook  # noqa: E402
+from init_project import DEFAULT_ANALYSIS, adapt_stage_docs, packaged_notebook  # noqa: E402
 from init_project import main as unused_init_main  # noqa: F401,E402
-from inspect_resources import choose, enrich_nodes, parse_scontrol, parse_sinfo  # noqa: E402
+from inspect_resources import choose, enrich_nodes, inspect as inspect_resources, parse_scontrol, parse_sinfo  # noqa: E402
 from inspect_run import TERMINAL_BAD, inspect as inspect_run  # noqa: E402
 from plan_workflow import make_tasks  # noqa: E402
-from submit_workflow import slurm_job_state  # noqa: E402
+from submit_workflow import slurm_job_state, submit  # noqa: E402
 from validate_project import allc_cell_id, validate, validate_allc_record  # noqa: E402
 
 
@@ -154,11 +163,17 @@ class SkillTests(unittest.TestCase):
         return intake_path
 
     def generate(self, root: Path, mode: str = "paired", bad_checksum: bool = False,
-                 mutate=None, init_args: tuple = ()) -> Path:
+                 mutate=None, init_args: tuple = (), env=None) -> Path:
         intake = self.build_inputs(root, mode, bad_checksum, mutate)
         project = root / "project"
+        # Generation runs in a subprocess, which cannot be patched from here, so a
+        # test that needs a different generating host declares it through the
+        # environment instead.
+        child_env = dict(os.environ)
+        child_env.update(env or {})
         subprocess.check_call([sys.executable, str(ROOT / "scripts" / "init_project.py"),
-                               "--intake", str(intake), "--output", str(project), *init_args])
+                               "--intake", str(intake), "--output", str(project), *init_args],
+                              env=child_env)
         return project
 
     def test_modes_and_route_detection(self):
@@ -539,6 +554,287 @@ class SkillTests(unittest.TestCase):
             self.assertEqual(result["status"], "invalid")
             self.assertIn("partitions", " ".join(result["errors"]))
 
+    # --- where a task may execute ----------------------------------------------
+
+    def test_host_role_classification_is_injectable(self):
+        """Every classification is decided from injected facts, never from the test host."""
+        with tempfile.TemporaryDirectory() as temp:
+            up = Path(temp) / "up.txt"
+            up.write_text("Slurmctld(primary) at ctl01 is UP\n", encoding="utf-8")
+            down = Path(temp) / "down.txt"
+            down.write_text("Slurmctld(primary) at ctl01 is DOWN\n", encoding="utf-8")
+            self.assertEqual(host_role(environ={"SLURM_JOB_ID": "41"}), "compute")
+            self.assertEqual(host_role(environ={"SLURM_JOBID": "41"}), "compute")
+            self.assertEqual(host_role(environ={}, reachable=True), "submit")
+            self.assertEqual(host_role(environ={}, reachable=False), "standalone")
+            self.assertEqual(host_role(environ={}, scontrol_file=up), "submit")
+            # A controller that answers but is DOWN refuses every submission, so a
+            # probe that read only the exit status would call this host a submit
+            # host and refuse work that has nowhere else to go.
+            self.assertEqual(host_role(environ={}, scontrol_file=down), "standalone")
+            self.assertEqual(slurm_allocation_id({"SLURM_JOB_ID": "41"}), "41")
+            self.assertEqual(slurm_allocation_id({"SLURM_JOB_ID": "  "}), "")
+            with self.assertRaises(WorkflowError):
+                host_role(environ={"SCMO_HOST_ROLE": "nonsense"})
+            self.assertEqual(host_role_source({"SCMO_HOST_ROLE": "submit"}), "declared")
+            self.assertEqual(host_role_source({}), "observed")
+
+    def test_available_partitions_reads_sinfo_and_drops_the_default_star(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Path(temp) / "sinfo.txt"
+            fixture.write_text("cpu*\nfat\ncpu\n\n", encoding="utf-8")
+            self.assertEqual(available_partitions(fixture), ["cpu", "fat"])
+
+    def test_effective_backend_promotes_local_on_a_submit_host(self):
+        scheduler = {"backend": "local"}
+        self.assertEqual(effective_backend(scheduler, "r1", environ={"SCMO_HOST_ROLE": "standalone"}),
+                         ("local", "declared"))
+        self.assertEqual(effective_backend(scheduler, "r1", environ={"SCMO_HOST_ROLE": "submit"}),
+                         ("slurm", "promoted-from-local"))
+        # In an allocation the local executor is itself on a compute node, which is
+        # where the work was supposed to go, so local stays legitimate.
+        self.assertEqual(effective_backend(scheduler, "r1", environ={"SLURM_JOB_ID": "9"}),
+                         ("local", "declared"))
+        acked = {"SCMO_HOST_ROLE": "submit", "SCMO_LOGIN_EXECUTION_ACK": "r1"}
+        self.assertEqual(effective_backend(scheduler, "r1", environ=acked), ("local", "declared"))
+        # The acknowledgement names one run, so it cannot cover the next one.
+        self.assertEqual(effective_backend(scheduler, "r2", environ=acked), ("slurm", "promoted-from-local"))
+        self.assertFalse(submit_host_execution_allowed("r2", environ=acked))
+        self.assertFalse(submit_host_execution_allowed("r1", environ={"SCMO_HOST_ROLE": "submit"}))
+        self.assertTrue(submit_host_execution_allowed("r1", environ={"SCMO_HOST_ROLE": "compute"}))
+        self.assertEqual(login_execution_ack(acked), "r1")
+        self.assertEqual(login_execution_ack({"SCMO_LOGIN_EXECUTION_ACK": "  "}), "")
+
+    def test_generated_backend_follows_the_generating_host(self):
+        def drop_backend(intake):
+            # The fixture declares `backend: local`, and a declaration wins, so the
+            # generated default is only observable once it is withdrawn.
+            intake["scheduler"].pop("backend", None)
+
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp) / "submit-host", "rna", mutate=drop_backend,
+                                    env={"SCMO_HOST_ROLE": "submit"})
+            scheduler = json.loads((project / "config/scheduler.yaml").read_text())
+            self.assertEqual(scheduler["backend"], "slurm")
+            self.assertIsInstance(scheduler["partitions"], list)
+            report = (project / "Report.md").read_text(encoding="utf-8")
+            self.assertIn("generating host", report)
+            self.assertIn("Slurm submit host", report)
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp) / "standalone", "rna", mutate=drop_backend,
+                                    env={"SCMO_HOST_ROLE": "standalone"})
+            self.assertEqual(json.loads((project / "config/scheduler.yaml").read_text())["backend"], "local")
+            self.assertIn("No Slurm controller answered", (project / "Report.md").read_text(encoding="utf-8"))
+
+    def test_a_declared_backend_the_host_cannot_honour_is_kept_and_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna", env={"SCMO_HOST_ROLE": "submit"})
+            # The fixture declares local; the declaration is the operator's, so it
+            # stands in the config, and the report is where the conflict is visible.
+            self.assertEqual(json.loads((project / "config/scheduler.yaml").read_text())["backend"], "local")
+            self.assertIn("cannot honour", (project / "Report.md").read_text(encoding="utf-8"))
+
+    def test_local_validation_warns_on_a_login_node_without_changing_the_signature(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            with mock.patch.dict(os.environ, {"SCMO_HOST_ROLE": "submit"}):
+                on_submit = validate(project)
+            with mock.patch.dict(os.environ, {"SCMO_HOST_ROLE": "standalone"}):
+                on_standalone = validate(project)
+            # A warning, not an error: planning and a dry run change nothing, and a
+            # read-only preflight has to stay usable from a host that is not the one
+            # the work will run on.
+            self.assertEqual(on_submit["status"], "valid")
+            self.assertEqual(on_submit["host_role"], "submit")
+            self.assertIn("submit host", " ".join(on_submit["warnings"]))
+            self.assertEqual(on_standalone["warnings"], [])
+            # The host is provenance, not input: a signature that moved with it would
+            # orphan every recorded full validation and block a signed plan.
+            self.assertEqual(on_submit["input_signature"], on_standalone["input_signature"])
+
+    def test_submit_promotes_a_local_project_to_slurm_on_a_login_node(self):
+        def declare_partitions(intake):
+            intake["scheduler"]["partitions"] = ["cpu"]
+
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna", mutate=declare_partitions)
+            subprocess.check_call([sys.executable, str(ROOT / "scripts" / "plan_workflow.py"),
+                                   "--project", str(project), "--routes", "auto", "--run-id", "unit"])
+            with mock.patch.dict(os.environ, {"SCMO_HOST_ROLE": "submit"}):
+                result = submit(project, "unit", dry_run=True)
+            self.assertEqual(result["status"], "dry_run")
+            self.assertEqual(result["backend_effective"], "slurm")
+            self.assertEqual(result["backend_source"], "promoted-from-local")
+            records = json.loads((project / ".workflow/runs/unit/submissions.json").read_text())
+            scanpy = [item for item in records if item["task"] == "scanpy"][0]
+            self.assertEqual(scanpy["backend_declared"], "local")
+            self.assertEqual(scanpy["backend_effective"], "slurm")
+            self.assertEqual(scanpy["host_role"], "submit")
+            self.assertFalse(scanpy["login_execution"])
+            # Nothing ran: a promotion that silently executed locally would leave a
+            # local_ job id behind, which is what the deployed evidence looked like.
+            self.assertFalse(scanpy["job_id"].startswith("local_"))
+
+    def test_promotion_on_a_login_node_says_which_partitions_exist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            subprocess.check_call([sys.executable, str(ROOT / "scripts" / "plan_workflow.py"),
+                                   "--project", str(project), "--routes", "auto", "--run-id", "unit"])
+            with mock.patch.dict(os.environ, {"SCMO_HOST_ROLE": "submit"}):
+                with self.assertRaises(WorkflowError) as caught:
+                    submit(project, "unit", dry_run=True)
+            # A promotion that needs a partition allow-list has to say so, and say
+            # what the cluster offers, rather than reporting the bare Slurm message.
+            message = str(caught.exception)
+            self.assertIn("promoted to Slurm", message)
+            self.assertIn("partitions", message)
+
+    def test_resource_snapshot_records_the_host_role(self):
+        fixtures = ROOT / "tests" / "fixtures"
+
+        def declare_partitions(intake):
+            intake["scheduler"]["partitions"] = ["cpu"]
+
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna", mutate=declare_partitions)
+            snapshot = inspect_resources(project, "scanpy")
+            self.assertEqual(snapshot["host_role"], "standalone")
+            self.assertEqual(snapshot["backend"], "local")
+            self.assertEqual(snapshot["nodes"], [])
+            # On a submit host the local branch is not taken, so the snapshot can no
+            # longer report a resource check that never queried the cluster.
+            with mock.patch.dict(os.environ, {"SCMO_HOST_ROLE": "submit"}):
+                promoted = inspect_resources(project, "scanpy", sinfo_file=fixtures / "sinfo.txt",
+                                             scontrol_file=fixtures / "scontrol.txt",
+                                             squeue_file=fixtures / "squeue.txt")
+            self.assertEqual(promoted["host_role"], "submit")
+            self.assertEqual(promoted["backend"], "slurm")
+            self.assertEqual(promoted["backend_source"], "promoted-from-local")
+            self.assertTrue(promoted["nodes"])
+
+    def test_run_task_refuses_a_login_node_before_writing_any_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            command = [sys.executable, str(project / "Scripts/Common/run_task.py"),
+                       "--project", str(project), "--run-id", "unit", "--task", "scanpy"]
+            refused = subprocess.run(command, env=dict(os.environ, SCMO_HOST_ROLE="submit"),
+                                     capture_output=True, text=True)
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("submit host", refused.stderr)
+            # Refused before it read a plan or made the task directory: a refusal is
+            # a precondition failure, and a status file here would read as a real try.
+            self.assertFalse((project / ".workflow/runs/unit/tasks/scanpy").exists())
+            # The acknowledgement is scoped to one run, and this is a different one.
+            mismatched = subprocess.run(command, capture_output=True, text=True, env=dict(
+                os.environ, SCMO_HOST_ROLE="submit", SCMO_LOGIN_EXECUTION_ACK="another-run"))
+            self.assertEqual(mismatched.returncode, 2)
+            self.assertIn("submit host", mismatched.stderr)
+            acknowledged = subprocess.run(command, capture_output=True, text=True, env=dict(
+                os.environ, SCMO_HOST_ROLE="submit", SCMO_LOGIN_EXECUTION_ACK="unit"))
+            self.assertNotIn("submit host", acknowledged.stderr)
+
+    def test_task_adapter_refuses_a_login_node(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            refused = subprocess.run(
+                [sys.executable, str(project / "Scripts/Common/task_adapter.py"),
+                 "--project", str(project), "--run-id", "unit", "--task", "scanpy",
+                 "--task-dir", str(project / ".workflow/runs/unit/tasks/scanpy")],
+                env=dict(os.environ, SCMO_HOST_ROLE="submit"), capture_output=True, text=True)
+            # A separate entry point, not a copy of run_task.py's guard: without it a
+            # hand call here runs a whole stage unchecked.
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("submit host", refused.stderr)
+
+    def test_a_local_run_records_the_host_it_ran_on(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            subprocess.check_call([sys.executable, str(ROOT / "scripts" / "plan_workflow.py"),
+                                   "--project", str(project), "--routes", "auto", "--run-id", "unit"])
+            subprocess.check_call([sys.executable, str(ROOT / "scripts" / "submit_workflow.py"),
+                                   "--project", str(project), "--run-id", "unit"])
+            records = json.loads((project / ".workflow/runs/unit/submissions.json").read_text())
+            scanpy = [item for item in records if item["task"] == "scanpy"][0]
+            self.assertEqual(scanpy["host_role"], "standalone")
+            self.assertEqual(scanpy["host_role_source"], "declared")
+            self.assertEqual(scanpy["backend_declared"], scanpy["backend_effective"])
+            self.assertFalse(scanpy["login_execution"])
+            status = json.loads((project / ".workflow/runs/unit/tasks/scanpy/task_status.json").read_text())
+            self.assertEqual(status["host_role"], "standalone")
+            self.assertEqual(status["slurm_job_id"], "")
+
+    def test_inspection_reports_a_login_node_run_and_says_the_role_is_unrecorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            plan = {"input_signature": "sig", "code_signature": "code",
+                    "result_dir": str(project / "Results" / "runs" / "legacy"),
+                    "tasks": [{"id": "scanpy", "profile": "scanpy", "dependencies": [], "parameters": {}}]}
+            run_dir = project / ".workflow" / "runs" / "legacy"
+            run_dir.mkdir(parents=True)
+            (run_dir / "plan.json").write_text(json.dumps(plan))
+            # A pre-fix record: it has a synthesized local id and no host role,
+            # which is exactly what the deployed runs looked like.
+            (run_dir / "submissions.json").write_text(json.dumps(
+                [{"task": "scanpy", "status": "complete", "job_id": "local_scanpy"}]))
+            summary = inspect_run(project, "legacy")
+            self.assertEqual(summary["login_execution_tasks"], ["scanpy"])
+            row = summary["tasks"][0]
+            self.assertTrue(row["executed_on_login_node"])
+            self.assertEqual(row["submitted_from_host_role"], "unrecorded")
+
+    def test_inspection_does_not_call_a_standalone_local_run_a_violation(self):
+        """With no controller there is no compute node, so local is correct there."""
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            plan = {"input_signature": "sig", "code_signature": "code",
+                    "result_dir": str(project / "Results" / "runs" / "solo"),
+                    "tasks": [{"id": "scanpy", "profile": "scanpy", "dependencies": [], "parameters": {}}]}
+            run_dir = project / ".workflow" / "runs" / "solo"
+            run_dir.mkdir(parents=True)
+            (run_dir / "plan.json").write_text(json.dumps(plan))
+            (run_dir / "submissions.json").write_text(json.dumps([
+                {"task": "scanpy", "status": "complete", "job_id": "local_scanpy",
+                 "host_role": "standalone", "backend_effective": "local"}]))
+            summary = inspect_run(project, "solo")
+            self.assertEqual(summary["login_execution_tasks"], [])
+            self.assertFalse(summary["tasks"][0]["executed_on_login_node"])
+            self.assertEqual(summary["tasks"][0]["submitted_from_host_role"], "standalone")
+
+    def test_inspection_separates_the_host_that_ran_a_task_from_the_one_that_submitted_it(self):
+        """The two roles differ on a healthy run, so one field cannot carry both."""
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.generate(Path(temp), "rna")
+            plan = {"input_signature": "sig", "code_signature": "code",
+                    "result_dir": str(project / "Results" / "runs" / "split"),
+                    "tasks": [{"id": "scanpy", "profile": "scanpy", "dependencies": [], "parameters": {}}]}
+            run_dir = project / ".workflow" / "runs" / "split"
+            run_dir.mkdir(parents=True)
+            (run_dir / "plan.json").write_text(json.dumps(plan))
+            (run_dir / "submissions.json").write_text(json.dumps([
+                {"task": "scanpy", "status": "submitted", "job_id": "4242", "host_role": "submit"}]))
+            task_dir = run_dir / "tasks" / "scanpy"
+            task_dir.mkdir(parents=True)
+            (task_dir / "task_status.json").write_text(json.dumps(
+                {"status": "failed", "host_role": "compute", "return_code": 1}))
+            row = inspect_run(project, "split")["tasks"][0]
+            self.assertEqual(row["submitted_from_host_role"], "submit")
+            self.assertEqual(row["executed_on_host_role"], "compute")
+            self.assertFalse(row["executed_on_login_node"])
+
+    def test_host_policy_is_stated_where_its_reader_will_find_it(self):
+        """This skill's reader is an agent, so the documented rule is part of the guard."""
+        execution = (ROOT / "references/execution.md").read_text(encoding="utf-8")
+        self.assertIn("## Host roles", execution)
+        self.assertIn("A planned task is never executed on a submit host", execution)
+        # The claim that the two backends were equivalent is what made a login node
+        # look like a supported place to run a full analysis.
+        self.assertNotIn("The local backend applies the same resource floors", execution)
+        self.assertIn("Never execute a planned task on a Slurm submit host",
+                      (ROOT / "SKILL.md").read_text(encoding="utf-8"))
+        for path in ("Scripts/Methylvi/allcools/run.sh", "Scripts/Methylvi/vmr/run.sh"):
+            script = (ROOT / "assets/project-template" / path).read_text(encoding="utf-8")
+            self.assertIn("is a Slurm submit host (login node)", script)
+
     def test_slurm_reserved_and_observed_memory_are_distinct(self):
         fixtures = ROOT / "tests" / "fixtures"
         nodes = enrich_nodes(
@@ -844,6 +1140,30 @@ class SkillTests(unittest.TestCase):
         # Prefix order: the DMR trainers must not fall through to the broader
         # `methylvi_vmr_` prefix, which would file them under the wrong report.
         self.assertEqual(stage_for_task("methylvi_vmr_dmr_0.01_2000"), "Methylvi/vmr_dmr")
+
+    def test_every_dag_task_has_a_stage_or_is_deliberately_unowned(self):
+        """No task may fall outside every stage log by omission.
+
+        The per-stage routing is an explicit table rather than a guess, so a task
+        added to the DAG without a stage would simply vanish from every stage
+        Report while the run still claims to have performed it. Enumerating the
+        DAG's own output here makes that a test failure instead of a silent gap.
+        """
+        # The run-level summary is the one task that belongs to no stage: it
+        # summarises the whole run, and every stage log showing it would read as
+        # though each stage had run it.
+        UNOWNED = {"workflow_summary"}
+        routes = {"scanpy": True, "methscan_vmr": True, "methscan_dmr": True, "allcools": True,
+                  "methylvi_allcools": True, "methylvi_vmr": True, "methylvi_vmr_dmr": True}
+        tasks = make_tasks(routes, json.loads(json.dumps(DEFAULT_ANALYSIS)))
+        self.assertTrue(tasks)
+        known = {stage for stage, _ in STAGE_REPORTS}
+        for item in tasks:
+            stage = stage_for_task(item["id"])
+            if item["id"] in UNOWNED:
+                self.assertIsNone(stage, item["id"])
+            else:
+                self.assertIn(stage, known, "%s has no stage report" % item["id"])
 
     def test_stage_log_counts_only_its_own_tasks(self):
         with tempfile.TemporaryDirectory() as temp:

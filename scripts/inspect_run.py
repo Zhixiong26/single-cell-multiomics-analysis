@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _common import (
-    TERMINAL_BAD_STATES, WorkflowError, refresh_run_log, refresh_stage_run_logs, signature,
-    validate_recorded_outputs, write_json,
+    HOST_ROLE_STANDALONE, TERMINAL_BAD_STATES, WorkflowError, refresh_run_log, refresh_stage_run_logs,
+    signature, validate_recorded_outputs, write_json,
 )
 
 
@@ -71,33 +71,65 @@ def inspect(project: Path, run_id: str) -> dict:
         marker = task_dir / "task.COMPLETE"
         status_path = task_dir / "task_status.json"
         evidence_valid, reason = False, None
-        if marker.is_file() and status_path.is_file():
+        # Parsed before the completion gate below, because "which host ran this"
+        # is asked of failed and incomplete tasks too. The role of the host the
+        # task actually ran on is deliberately not the submission record's role:
+        # that one names the host that called sbatch, and on a healthy run the
+        # two differ.
+        status_record = None
+        if status_path.is_file():
             try:
                 status_record = json.loads(status_path.read_text(encoding="utf-8"))
-                expected_signature = signature({
-                    "command": status_record.get("command", []),
-                    "parameters": planned.get("parameters", {}),
-                })
-                outputs_valid, output_reason = validate_recorded_outputs(status_record.get("outputs", []))
-                evidence_valid = (
-                    status_record.get("status") == "complete"
-                    and status_record.get("return_code") == 0
-                    and status_record.get("input_signature") == plan.get("input_signature")
-                    and status_record.get("code_signature") == plan.get("code_signature")
-                    and status_record.get("task_signature") == expected_signature
-                    and outputs_valid
-                )
-                if not evidence_valid:
-                    reason = output_reason or "completion evidence or signature mismatch"
             except (OSError, ValueError, TypeError):
+                status_record = None
+        executed_on_host_role = str((status_record or {}).get("host_role") or "unrecorded")
+        if marker.is_file() and status_path.is_file():
+            if status_record is None:
                 reason = "invalid task_status.json"
+            else:
+                try:
+                    expected_signature = signature({
+                        "command": status_record.get("command", []),
+                        "parameters": planned.get("parameters", {}),
+                    })
+                    outputs_valid, output_reason = validate_recorded_outputs(
+                        status_record.get("outputs", []))
+                    evidence_valid = (
+                        status_record.get("status") == "complete"
+                        and status_record.get("return_code") == 0
+                        and status_record.get("input_signature") == plan.get("input_signature")
+                        and status_record.get("code_signature") == plan.get("code_signature")
+                        and status_record.get("task_signature") == expected_signature
+                        and outputs_valid
+                    )
+                    if not evidence_valid:
+                        reason = output_reason or "completion evidence or signature mismatch"
+                except (OSError, ValueError, TypeError):
+                    reason = "invalid task_status.json"
         elif marker.is_file() or status_path.is_file():
             reason = "incomplete marker/status evidence"
         state = "complete" if evidence_valid else scheduler_state
+        # A synthesized `local_<task>` id means the task ran on the host that
+        # submitted it, not on a compute node. Records written before the host
+        # role was recorded at all are the ones that cannot be told apart any
+        # other way, so the id is what identifies them -- including runs that
+        # predate this field and were never audited.
+        #
+        # On a machine with no controller there is no compute node to submit to,
+        # so a local run there is the correct outcome rather than a violation;
+        # the submission's own role is what distinguishes the two. An unrecorded
+        # role stays a violation, which is what keeps pre-fix runs visible.
+        submitted_from_host_role = str((item or {}).get("host_role") or "unrecorded")
+        executed_on_login_node = (
+            job_id.startswith("local_") and submitted_from_host_role != HOST_ROLE_STANDALONE
+        )
         task_rows.append({
             "task": planned["id"], "job_id": job_id, "state": state,
             "complete_marker": marker.is_file(), "evidence_valid": evidence_valid,
             "evidence_error": reason, "resource_usage": usage.get(job_id),
+            "executed_on_login_node": executed_on_login_node,
+            "executed_on_host_role": executed_on_host_role,
+            "submitted_from_host_role": submitted_from_host_role,
         })
     if any(row["state"] in TERMINAL_BAD for row in task_rows):
         status = "failed"
@@ -107,11 +139,16 @@ def inspect(project: Path, run_id: str) -> dict:
         status = "in_progress"
     else:
         status = "planned"
+    login_tasks = [row["task"] for row in task_rows if row["executed_on_login_node"]]
     result = {
         "schema_version": 1, "run_id": run_id, "status": status,
         "checked_at": datetime.now(timezone.utc).isoformat(), "tasks": task_rows,
         "input_signature": plan.get("input_signature"),
+        "login_execution_tasks": login_tasks,
     }
+    if login_tasks:
+        print("WARNING: %d task(s) of run %s executed on the host that submitted them, not on a "
+              "compute node: %s" % (len(login_tasks), run_id, ", ".join(login_tasks)), file=sys.stderr)
     write_json(run_dir / "run_summary.json", result)
     if status == "complete":
         (run_dir / "workflow.COMPLETE").touch()

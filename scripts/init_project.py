@@ -8,16 +8,18 @@ import csv
 import hashlib
 import json
 import shutil
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from _common import (
-    DATA_ROOT_NAME, RUNLOG_NOTE, RUNLOG_START, RUNLOG_TITLE, SAMPLE_COLUMNS, STAGE_CONTEXT_END,
-    STAGE_CONTEXT_START, STAGE_REPORTS, WorkflowError, apply_data_sources, as_bool, data_sources,
-    git_commit, load_structured, outside_project, plan_data_sources, render_run_log_region,
-    resolve_path, write_json,
+    DATA_ROOT_NAME, HOST_ROLE_STANDALONE, HOST_ROLE_SUBMIT, RUNLOG_NOTE, RUNLOG_START, RUNLOG_TITLE,
+    SAMPLE_COLUMNS, STAGE_CONTEXT_END, STAGE_CONTEXT_START, STAGE_REPORTS, WorkflowError,
+    apply_data_sources, as_bool, available_partitions, data_sources, git_commit, host_role,
+    load_structured, outside_project, plan_data_sources, render_run_log_region, resolve_path,
+    write_json,
 )
 
 
@@ -365,6 +367,7 @@ def bilingual_readme(project_cfg, analysis_cfg, scheduler_cfg, samples, environm
         "no_profiles": "未定义命名档位。",
         "run_heading": "### 运行",
         "run_items": [
+            "长任务只提交到计算节点，登录节点只用于校验、计划、提交与检查；在提交节点上，`backend: local` 会被改为 Slurm 提交。",
             "环境：`python tools/bootstrap_environments.py --execute`",
             "校验：quick 校验用于快速体检，full 校验是正式提交的前置；结论记录在 `.workflow/validations/`。",
             "计划：`python tools/plan_workflow.py --project . --routes auto`",
@@ -408,6 +411,7 @@ def bilingual_readme(project_cfg, analysis_cfg, scheduler_cfg, samples, environm
         "no_profiles": "No named profiles are defined.",
         "run_heading": "### Running",
         "run_items": [
+            "Long-running tasks are submitted to compute nodes; the login node only validates, plans, submits, and inspects. On a submit host, `backend: local` is submitted to Slurm instead.",
             "Environments: `python tools/bootstrap_environments.py --execute`",
             "Validation: quick validates cheaply, full validation gates a production submit; verdicts are recorded under `.workflow/validations/`.",
             "Plan: `python tools/plan_workflow.py --project . --routes auto`",
@@ -440,6 +444,57 @@ def bilingual_readme(project_cfg, analysis_cfg, scheduler_cfg, samples, environm
     return "\n".join(lines) + "\n"
 
 
+def _scheduler_origin_lines(provenance: Dict[str, Any]) -> list:
+    """Report the generating host and the backend decision it implied.
+
+    Both languages, because the report is bilingual throughout. The host name is
+    legitimate here and not in the README: this is the provenance record, and a
+    backend default cannot be checked later without knowing which host chose it.
+    """
+    provenance = provenance or {}
+    role = str(provenance.get("host_role") or "")
+    host = _cell(provenance.get("hostname"))
+    backend = _cell(provenance.get("default_backend"))
+    partitions = [str(value) for value in (provenance.get("inferred_partitions") or [])]
+    lines = ["- 生成主机 / generating host: `%s` (%s)" % (host, _cell(role))]
+    if role == HOST_ROLE_SUBMIT:
+        lines += [
+            "- 调度后端 / scheduler backend: `%s` —— 生成主机是 Slurm 提交节点（登录节点），"
+            "因此本项目的任务提交到计算节点，不在登录节点执行。" % backend,
+            "- The generating host is a Slurm submit host (a login node), so tasks are submitted to "
+            "compute nodes and none executes on the login node.",
+        ]
+    elif role == HOST_ROLE_STANDALONE:
+        lines += [
+            "- 调度后端 / scheduler backend: `%s` —— 生成主机上探测不到可用的 Slurm 控制器，"
+            "本机没有可提交的计算节点，因此任务在提交它的这台机器上执行（单机模式）。" % backend,
+            "- No Slurm controller answered on the generating host, so there is no compute node to "
+            "submit to: tasks run on the machine that submits them.",
+        ]
+    else:
+        lines += [
+            "- 调度后端 / scheduler backend: `%s` —— 项目生成于一个 Slurm 分配内部。" % backend,
+            "- The project was generated inside a Slurm allocation.",
+        ]
+    if provenance.get("partitions_inferred"):
+        lines += [
+            "- 分区允许列表 / partition allow-list: `%s` —— **由生成主机上 `sinfo` 报告的可用分区推断得出，"
+            "不是站点声明的**；请按站点策略核对 `config/scheduler.yaml` 的 `partitions`。"
+            % _cell(", ".join(partitions) or "none reported"),
+            "- **Inferred** from the partitions `sinfo` reported on the generating host, not declared by "
+            "the site; check `scheduler.partitions` in `config/scheduler.yaml` against site policy.",
+        ]
+    declared = str(provenance.get("declared_backend") or "")
+    if declared and declared != provenance.get("default_backend"):
+        lines += [
+            "- 注意 / note: intake 声明 `backend: %s`，与生成主机的 %s 不一致；声明值保留在配置中，"
+            "但本机不会执行本地任务。" % (_cell(declared), _cell(role)),
+            "- The intake declares `backend: %s`, which this %s host cannot honour; the declaration is kept "
+            "in `config/scheduler.yaml`, but no local task will execute here." % (_cell(declared), _cell(role)),
+        ]
+    return lines
+
+
 def bilingual_report(project_id: str, provenance: Dict[str, Any], data_rows=None,
                      data_outside=None, reference_notes=None, reference_warnings=None) -> str:
     """Render the root Report.md: the human plan, then the tool-owned run region.
@@ -456,6 +511,9 @@ def bilingual_report(project_id: str, provenance: Dict[str, Any], data_rows=None
         "- Skill / 技能: `single-cell-multiomics-analysis` %s" % _cell((provenance or {}).get("skill_version")),
         "- Skill commit / 技能提交: `%s`" % _cell((provenance or {}).get("skill_git_commit")),
         "- Runtime evidence / 运行证据: `.workflow/runs/<run-id>/run_summary.json`",
+    ]
+    planned += _scheduler_origin_lines(provenance)
+    planned += [
         "- 本段位于运行记录区域之上，属人类文本，工具不会改写。",
         "- This section sits above the run-log region and is human text; the tools never rewrite it.",
     ]
@@ -679,14 +737,28 @@ def main() -> int:
     annotation.setdefault("profile", None)
     annotation.setdefault("review_status", "unreviewed")
     analysis_cfg = {"schema_version": 2, "analysis": merge(DEFAULT_ANALYSIS, intake.get("analysis") or {})}
+    # The backend a project is born with is a property of the host that generates
+    # it, because that is where its tasks would otherwise run. A project generated
+    # on a submit host would default to executing every task on the login node, so
+    # it is generated for Slurm instead; a machine with no controller has nothing
+    # to submit to, and there local execution is the only execution there is.
+    generation_role = host_role()
+    default_backend = "local" if generation_role == HOST_ROLE_STANDALONE else "slurm"
+    inferred_partitions = available_partitions() if default_backend == "slurm" else []
     scheduler_cfg = merge({
-        "schema_version": 2, "backend": "local", "account": None,
-        "partitions": [], "allow_nodes": [], "exclude_nodes": [],
+        "schema_version": 2, "backend": default_backend, "account": None,
+        "partitions": inferred_partitions, "allow_nodes": [], "exclude_nodes": [],
         "memory_headroom_mb": 4096, "max_parallel": 2, "validation_workers": 4,
         "limited_profiles": ["methscan_branch", "dmr", "feature_builder", "trainer"],
         "local": {"max_threads": 16, "max_memory": "64G"}, "profiles": DEFAULT_PROFILES,
     }, intake.get("scheduler") or {})
     scheduler_cfg["schema_version"] = 2
+    declared_backend = str((intake.get("scheduler") or {}).get("backend") or "").strip().lower()
+    partitions_inferred = bool(inferred_partitions) and not (intake.get("scheduler") or {}).get("partitions")
+    if declared_backend and declared_backend != default_backend:
+        print("WARNING: the intake declares scheduler.backend=%s but this host is a Slurm %s host; "
+              "validate and submit will not execute a local task here."
+              % (declared_backend, generation_role), file=sys.stderr)
     write_json(output / "config" / "project.yaml", project_cfg)
     write_json(output / "config" / "analysis.yaml", analysis_cfg)
     write_json(output / "config" / "scheduler.yaml", scheduler_cfg)
@@ -710,6 +782,16 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "skill_version": (SKILL_ROOT / "VERSION").read_text().strip(),
         "skill_git_commit": git_commit(SKILL_ROOT),
+        # Where this project was generated, and what that decided. The Report is
+        # the provenance record -- it already names resolved targets and inferred
+        # genome ids -- so the host belongs here, and the backend default is only
+        # explicable if the host that chose it is written down beside it.
+        "host_role": generation_role,
+        "hostname": socket.gethostname(),
+        "default_backend": default_backend,
+        "declared_backend": declared_backend,
+        "inferred_partitions": inferred_partitions,
+        "partitions_inferred": partitions_inferred,
     }
     # Links are created here because the intake's paths are visible on the host
     # that has just read them. Downloads are not: a url source can be arbitrarily

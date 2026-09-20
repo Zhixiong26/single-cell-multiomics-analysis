@@ -13,8 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from _common import (WorkflowError, load_project, signature, task_override,
-                     validate_recorded_outputs, write_json)  # noqa: E402
+from _common import (WorkflowError, host_role, host_role_source, load_project, login_execution_ack,
+                     login_host_refusal, signature, slurm_allocation_id, submit_host_execution_allowed,
+                     task_override, validate_recorded_outputs, write_json)  # noqa: E402
 
 
 def render_command(command, variables):
@@ -67,6 +68,12 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--task", required=True)
     args = parser.parse_args()
+    # Refuse before reading any configuration or creating the task directory. A
+    # refusal is a precondition failure, not a task result: writing
+    # task_status.json here would overwrite a previous attempt's evidence and
+    # would read as a real try. Exit 2 separates it from a task that failed (1).
+    if not submit_host_execution_allowed(args.run_id):
+        raise WorkflowError(login_host_refusal("execute task %s of run %s" % (args.task, args.run_id)))
     root = args.project.resolve()
     run_dir = root / ".workflow" / "runs" / args.run_id
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
@@ -98,6 +105,12 @@ def main() -> int:
         "task_signature": signature({"command": rendered, "parameters": item.get("parameters", {})}),
         "allocated_cpus": os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SCMO_CPUS")),
         "allocated_memory_mb": os.environ.get("SLURM_MEM_PER_NODE", os.environ.get("SCMO_MEMORY_MB")),
+        # Where this actually ran, so a status file distinguishes a compute-node
+        # run from one that executed on a login node under an explicit
+        # acknowledgement. Absent from records written before this field existed.
+        "host_role": host_role(), "host_role_source": host_role_source(),
+        "slurm_job_id": slurm_allocation_id(),
+        "login_execution_ack": login_execution_ack(),
     }
     write_json(task_dir / "task_status.json", state)
     try:

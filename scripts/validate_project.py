@@ -16,9 +16,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from _common import (
-    WorkflowError, load_environments, load_project, load_samples, parse_memory_mb,
-    plan_data_sources, project_files, resolve_path, sha256_file, signature,
-    stored_data_sources, write_json,
+    HOST_ROLE_STANDALONE, HOST_ROLE_SUBMIT, WorkflowError, host_role, host_role_source,
+    load_environments, load_project, load_samples, parse_memory_mb, plan_data_sources,
+    project_files, resolve_path, sha256_file, signature, stored_data_sources, write_json,
 )
 
 
@@ -274,6 +274,18 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
         errors.append("scheduler.backend must be local or slurm")
     if backend == "slurm" and not scheduler.get("partitions"):
         errors.append("Slurm backend requires a non-empty scheduler.partitions allow-list")
+    # A warning, not an error. Planning and a dry run change nothing on disk, and
+    # a read-only preflight has to stay usable from a host that is not the one the
+    # work will run on -- the same reason --allow-missing-paths exists. The guard
+    # that decides is at execution, where the task would actually start.
+    role = host_role()
+    if backend == "local" and role == HOST_ROLE_SUBMIT:
+        warnings.append("scheduler.backend is local but this host is a Slurm submit host (login node): "
+                        "submission promotes this run to Slurm, and a task executed here directly "
+                        "would run on the login node. Use backend slurm, or run inside an allocation.")
+    elif backend == "slurm" and role == HOST_ROLE_STANDALONE:
+        warnings.append("scheduler.backend is slurm but no Slurm controller answers from this host: "
+                        "compute resources cannot be inspected here, and submission will fail.")
     profiles = scheduler.get("profiles") or {}
     required_profiles = {"scanpy", "io_builder", "serial", "methscan_branch", "dmr",
                          "dmr_prepare", "feature_builder", "trainer", "plot", "summary"}
@@ -361,6 +373,11 @@ def validate(project: Path, require_paths: bool = True, mode: str = "quick", wor
         # a link's transient state would otherwise churn that signature for nothing.
         "data": data_validation,
         "code_signature": code_signature, "errors": errors, "warnings": warnings,
+        # Which host ran this check. Provenance, like `data` above, and for the
+        # same reason kept out of the signature below: a signature that changed
+        # with the validating host would orphan every recorded full validation
+        # and trip the pre-submit "input signature changed after planning" check.
+        "host_role": role, "host_role_source": host_role_source(),
     }
     payload["input_signature"] = signature({
         "project": {key: value for key, value in cfg.items() if key not in {"project_root", "config_files"}},

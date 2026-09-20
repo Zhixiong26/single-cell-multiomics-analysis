@@ -12,8 +12,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import (WorkflowError, load_project, task_is_implemented,
-                     validate_recorded_outputs, write_json)
+from _common import (HOST_ROLE_SUBMIT, LOGIN_EXECUTION_VARIABLE, WorkflowError, available_partitions,
+                     effective_backend, host_role, host_role_source, load_project, login_execution_ack,
+                     task_is_implemented, validate_recorded_outputs, write_json)
 from inspect_resources import inspect
 from validate_project import validate
 
@@ -92,7 +93,8 @@ def slurm_job_state(job_id: str) -> str:
     return states[0]
 
 
-def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
+def submit(project: Path, run_id: str, dry_run: bool = False,
+           allow_login_execution: bool = False) -> dict:
     root = Path(project).resolve()
     run_dir, plan = load_plan(root, run_id)
     required_stages = {stage for item in plan.get("tasks", [])
@@ -105,8 +107,23 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
         raise WorkflowError("input signature changed after planning; create a new run-id")
     cfg = load_project(root)
     scheduler = cfg["scheduler"]
-    backend = scheduler.get("backend", "local")
+    role = host_role()
+    # The acknowledgement is passed as a value into the environment the task will
+    # see, never written into os.environ: an inherited variable would ride along
+    # into an sbatch job (--export ALL) and into later runs, and a bypass that
+    # propagates itself is not bound to the run it was granted for.
+    child_env = os.environ.copy()
+    if allow_login_execution:
+        child_env[LOGIN_EXECUTION_VARIABLE] = run_id
+    backend, backend_source = effective_backend(scheduler, run_id, role=role, environ=child_env)
     if backend == "slurm" and not scheduler.get("partitions"):
+        if backend_source == "promoted-from-local":
+            observed = available_partitions()
+            raise WorkflowError(
+                "scheduler.backend is local but this host is a Slurm submit host, so run %s was "
+                "promoted to Slurm rather than executed on the login node; that needs a partition "
+                "allow-list and scheduler.partitions is empty. List the partitions this project may "
+                "use%s." % (run_id, " -- this cluster offers %s" % ", ".join(observed) if observed else ""))
         raise WorkflowError("Slurm backend requires a non-empty scheduler.partitions allow-list")
     if not dry_run:
         validation_path = root / ".workflow" / "validations" / (current["input_signature"] + ".full.json")
@@ -164,7 +181,7 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
             existing["status"] = "retryable"
             existing["previous_job_id"] = str(existing["job_id"])
         snapshot_path = run_dir / "resource_snapshots" / (task_id + ".json")
-        snapshot = inspect(root, item["profile"])
+        snapshot = inspect(root, item["profile"], run_id=run_id, resolved_backend=backend)
         write_json(snapshot_path, snapshot)
         recommendation = snapshot["recommendation"]
         command = task_command(root, run_id, item)
@@ -187,13 +204,22 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
             "throttle_dependencies": throttle_dependencies,
             "resource_snapshot": str(snapshot_path), "recommendation": recommendation,
             "command": command, "submitted_at": datetime.now(timezone.utc).isoformat(),
+            # Which host decided, and which backend really ran. A record that does
+            # not say both cannot show that work stayed off the login node, and
+            # `backend_declared` differing from `backend_effective` is what a
+            # promotion looks like after the fact.
+            "host_role": role, "host_role_source": host_role_source(),
+            "backend_declared": str(scheduler.get("backend") or "local").strip().lower(),
+            "backend_effective": backend, "backend_source": backend_source,
+            "login_execution": backend == "local" and role == HOST_ROLE_SUBMIT,
+            "login_execution_ack": login_execution_ack(child_env) if backend == "local" else "",
         }
         if dry_run:
             record["status"] = "dry_run"
             record["job_id"] = "dry_%s" % task_id
             job_ids[task_id] = record["job_id"]
         elif backend == "local":
-            env = os.environ.copy()
+            env = dict(child_env)
             env["SCMO_CPUS"] = str(recommendation["cpus"])
             env["SCMO_MEMORY_MB"] = str(recommendation["memory_mb"])
             code = subprocess.call(command, cwd=str(root), env=env)
@@ -238,8 +264,15 @@ def submit(project: Path, run_id: str, dry_run: bool = False) -> dict:
         write_json(submissions_path, [records[x["id"]] for x in plan["tasks"] if x["id"] in records])
     plan["status"] = "dry_run" if dry_run else ("submitted" if backend == "slurm" else "complete")
     plan["job_ids"] = job_ids
+    plan["host_role"] = role
+    plan["backend_declared"] = str(scheduler.get("backend") or "local").strip().lower()
+    plan["backend_effective"] = backend
+    plan["backend_source"] = backend_source
+    if backend == "local" and role == HOST_ROLE_SUBMIT:
+        plan["login_execution_ack"] = login_execution_ack(child_env)
     write_json(run_dir / "plan.json", plan)
-    return {"status": plan["status"], "run_dir": str(run_dir), "jobs": job_ids}
+    return {"status": plan["status"], "run_dir": str(run_dir), "jobs": job_ids,
+            "host_role": role, "backend_effective": backend, "backend_source": backend_source}
 
 
 def main() -> int:
@@ -247,8 +280,15 @@ def main() -> int:
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-login-execution", action="store_true",
+        help="Execute this run's tasks on this host even when it is a Slurm submit host. The "
+             "acknowledgement names the run, is recorded in submissions.json and in each task's "
+             "status file, and is never inherited by a submitted job or a later run. Use it for "
+             "small debugging runs only; prefer running inside an allocation: salloc, or "
+             "srun --pty bash.")
     args = parser.parse_args()
-    result = submit(args.project, args.run_id, args.dry_run)
+    result = submit(args.project, args.run_id, args.dry_run, args.allow_login_execution)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

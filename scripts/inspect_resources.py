@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from _common import WorkflowError, load_project, parse_memory_mb, write_json
+from _common import (WorkflowError, effective_backend, host_role, host_role_source, load_project,
+                     parse_memory_mb, write_json)
 
 
 ACTIVE_STATES = {"idle", "mixed"}
@@ -135,12 +136,26 @@ def choose(nodes: List[Dict[str, Any]], scheduler: Dict[str, Any], profile: Dict
     }
 
 
-def inspect(project: Path, task: str, sinfo_file: Optional[Path] = None, scontrol_file: Optional[Path] = None, squeue_file: Optional[Path] = None) -> Dict[str, Any]:
+def inspect(project: Path, task: str, sinfo_file: Optional[Path] = None, scontrol_file: Optional[Path] = None, squeue_file: Optional[Path] = None,
+            ping_file: Optional[Path] = None, run_id: str = "",
+            resolved_backend: Optional[str] = None) -> Dict[str, Any]:
     cfg = load_project(project)
     scheduler = cfg["scheduler"]
-    backend = scheduler.get("backend", "local")
+    declared = str(scheduler.get("backend") or "local").strip().lower()
+    role = host_role(scontrol_file=ping_file) if ping_file is not None else host_role()
+    if resolved_backend is None:
+        backend, backend_source = effective_backend(scheduler, run_id, role=role)
+    else:
+        # The caller resolved this through the same rule and holds the
+        # acknowledgement in the environment its task will run with, which this
+        # process cannot see. It is recorded, not re-derived, so the snapshot and
+        # the submission cannot disagree about which backend ran.
+        backend = str(resolved_backend).strip().lower()
+        backend_source = "declared" if backend == declared else "promoted-from-local"
     snapshot: Dict[str, Any] = {
         "schema_version": 1, "task": task, "backend": backend,
+        "backend_declared": declared, "backend_source": backend_source,
+        "host_role": role, "host_role_source": host_role_source(),
         "captured_at": datetime.now(timezone.utc).isoformat(),
     }
     profile = profile_for(scheduler, task)
@@ -154,6 +169,8 @@ def inspect(project: Path, task: str, sinfo_file: Optional[Path] = None, scontro
             raise WorkflowError("local limits are below the task resource floor")
         snapshot["recommendation"] = {"cpus": cpus, "memory_mb": memory_mb, "memory": "%dM" % memory_mb}
         snapshot["nodes"] = []
+        snapshot["note"] = ("local backend: the task runs on this host, so no cluster is queried and "
+                            "the numbers above are the configured limits floored against the profile")
         return snapshot
     if backend != "slurm":
         raise WorkflowError("unsupported scheduler backend: %s" % backend)

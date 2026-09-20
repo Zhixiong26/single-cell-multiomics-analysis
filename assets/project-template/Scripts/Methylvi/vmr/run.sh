@@ -13,6 +13,22 @@ if [[ -z "${SCMO_MANAGED_RUN_ID:-}" ]]; then
   fi
   echo "WARNING: standalone run without a managed run ID; no completion evidence is recorded." >&2
 fi
+# The acknowledgement above says a run may bypass the DAG; it says nothing about
+# which host may execute it. A submit host has a controller to submit to, so the
+# work belongs in a job there. This is the shell counterpart of the guard in
+# run_task.py, and it exists because this script is reachable by hand: without it
+# a direct call runs the whole route on the login node. An allocation sets
+# SLURM_JOB_ID, so the packaged sbatch wrappers pass through untouched.
+authorised=0
+if [[ -n "${SCMO_MANAGED_RUN_ID:-}" && "${SCMO_LOGIN_EXECUTION_ACK:-}" == "${SCMO_MANAGED_RUN_ID}" ]]; then
+  authorised=1
+fi
+if [[ -z "${SLURM_JOB_ID:-}" && "$authorised" == 0 ]] && ping=$(scontrol ping 2>/dev/null) && [[ "$ping" == *"is UP"* ]]; then
+  echo "Refusing to run: $(hostname) is a Slurm submit host (login node), so this route would" >&2
+  echo "run on the login node. Submit the run DAG instead: submit_workflow.py, or work inside an" >&2
+  echo "allocation: salloc, or srun --pty bash." >&2
+  exit 2
+fi
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # The run DAG and the packaged sbatch wrappers export SCMO_PROJECT_ROOT; a call

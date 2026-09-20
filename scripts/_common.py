@@ -8,8 +8,10 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -669,6 +671,204 @@ def parse_memory_mb(value: Any) -> int:
 def command_exists(command: str) -> bool:
     from shutil import which
     return which(command) is not None
+
+
+# --- host role ---------------------------------------------------------------
+#
+# Where a task may execute is a property of the host, not of the configuration,
+# and it is the one policy a config file cannot state: a project that declares
+# `backend: local` while sitting on a cluster login node still executes its tasks
+# on that login node. The role is resolved through this section and nowhere
+# else, so the resource snapshot, the submission record, and the task's own
+# status file cannot end up disagreeing about where the work ran.
+#
+#   compute     inside a Slurm allocation. The local executor is itself on a
+#               compute node, so local execution is legitimate.
+#   submit      a controller answers but this process holds no allocation: a
+#               login node. Tasks must be submitted, not executed.
+#   standalone  no controller at all: a single machine with nothing to submit
+#               to, where refusing local execution would only make the workflow
+#               unusable without moving any work.
+#
+# `scontrol ping` is the probe rather than `sinfo`/`squeue`. Slurm client
+# commands on PATH prove nothing (slurm-client is an ordinary development
+# package), `squeue -u $USER` prints nothing and exits 0 on a laptop and on a
+# login node alike, and `sinfo` output only becomes meaningful once parsed.
+# `scontrol ping` answers exactly one question. Its exit status alone is still
+# not enough: a controller that is reachable but DOWN refuses every submission,
+# so the reply itself has to report UP.
+
+HOST_ROLE_COMPUTE = "compute"
+HOST_ROLE_SUBMIT = "submit"
+HOST_ROLE_STANDALONE = "standalone"
+HOST_ROLES = (HOST_ROLE_COMPUTE, HOST_ROLE_SUBMIT, HOST_ROLE_STANDALONE)
+
+# SLURM_JOBID is the pre-17.02 spelling of SLURM_JOB_ID. Both are Slurm-written.
+ALLOCATION_VARIABLES = ("SLURM_JOB_ID", "SLURM_JOBID")
+CONTROLLER_PROBE = ("scontrol", "ping")
+CONTROLLER_PROBE_TIMEOUT = 20
+CONTROLLER_UP = "is UP"
+
+# A declaration of fact for tests and diagnostics, so that one test suite does
+# not behave differently on a login node than on a workstation. It states which
+# host you are on; it never waives the rule that follows from being on it.
+HOST_ROLE_VARIABLE = "SCMO_HOST_ROLE"
+# Names the single run whose tasks may execute on a submit host. Only
+# submit_workflow.py sets it, only for one invocation, and only when the
+# operator asked for it by flag. It carries a run id so an acknowledgement given
+# for one run cannot silently cover the next.
+LOGIN_EXECUTION_VARIABLE = "SCMO_LOGIN_EXECUTION_ACK"
+
+
+def slurm_allocation_id(environ: Optional[Dict[str, str]] = None) -> str:
+    """The allocation this process is inside, or "" when it is in none.
+
+    The value is deliberately not validated. A false "compute" can only come
+    from a variable Slurm itself wrote, while a false "submit" would refuse a
+    job Slurm had already accepted.
+    """
+    values = os.environ if environ is None else environ
+    for name in ALLOCATION_VARIABLES:
+        value = str(values.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def slurm_controller_reachable(scontrol_file: Optional[Path] = None,
+                               timeout: int = CONTROLLER_PROBE_TIMEOUT) -> bool:
+    """True when a Slurm controller answers and reports itself UP."""
+    if scontrol_file is not None:
+        try:
+            text = Path(scontrol_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise WorkflowError("cannot read scontrol fixture %s: %s" % (scontrol_file, exc))
+    else:
+        try:
+            text = subprocess.check_output(list(CONTROLLER_PROBE), stderr=subprocess.STDOUT,
+                                           timeout=timeout).decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            # No client, no controller, or no answer in time. All three mean the
+            # same thing here: this machine has no scheduler to submit to.
+            return False
+    return CONTROLLER_UP in text
+
+
+def available_partitions(sinfo_file: Optional[Path] = None) -> List[str]:
+    """Partition names this site offers, as `sinfo` lists them.
+
+    Used to tell a generated project which partitions exist so a human can fill
+    the allow-list in deliberately; which of them this project may use stays the
+    site's decision, and whatever is recorded from here is marked inferred.
+    """
+    if sinfo_file is not None:
+        try:
+            text = Path(sinfo_file).read_text(encoding="utf-8")
+        except OSError:
+            return []
+    else:
+        try:
+            text = subprocess.check_output(["sinfo", "-h", "-o", "%P"], stderr=subprocess.STDOUT,
+                                           timeout=CONTROLLER_PROBE_TIMEOUT).decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            return []
+    names: List[str] = []
+    for line in text.splitlines():
+        # `%P` stars the default partition.
+        name = line.strip().rstrip("*")
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+@lru_cache(maxsize=None)
+def _controller_probe() -> bool:
+    """One controller probe per process, for the production path only."""
+    return slurm_controller_reachable()
+
+
+def host_role(environ: Optional[Dict[str, str]] = None, scontrol_file: Optional[Path] = None,
+              reachable: Optional[bool] = None) -> str:
+    """Classify this host as compute, submit, or standalone.
+
+    `environ`, `scontrol_file`, and `reachable` exist so tests do not depend on
+    the machine they run on. Passing `environ` alone does not stub the probe: a
+    caller that needs a fixed answer passes `reachable` or `scontrol_file` too.
+    """
+    values = os.environ if environ is None else environ
+    declared = str(values.get(HOST_ROLE_VARIABLE) or "").strip().lower()
+    if declared:
+        if declared not in HOST_ROLES:
+            raise WorkflowError("%s must be one of %s, not %r"
+                                % (HOST_ROLE_VARIABLE, list(HOST_ROLES), declared))
+        return declared
+    if slurm_allocation_id(values):
+        return HOST_ROLE_COMPUTE
+    if reachable is None:
+        reachable = (slurm_controller_reachable(scontrol_file=scontrol_file)
+                     if scontrol_file is not None else _controller_probe())
+    return HOST_ROLE_SUBMIT if reachable else HOST_ROLE_STANDALONE
+
+
+def host_role_source(environ: Optional[Dict[str, str]] = None) -> str:
+    """Whether the role was declared through the environment or observed here."""
+    values = os.environ if environ is None else environ
+    return "declared" if str(values.get(HOST_ROLE_VARIABLE) or "").strip() else "observed"
+
+
+def login_execution_ack(environ: Optional[Dict[str, str]] = None) -> str:
+    """The run id whose tasks may execute on a submit host, or ""."""
+    values = os.environ if environ is None else environ
+    return str(values.get(LOGIN_EXECUTION_VARIABLE) or "").strip()
+
+
+def submit_host_execution_allowed(run_id: str = "", role: Optional[str] = None,
+                                  environ: Optional[Dict[str, str]] = None,
+                                  scontrol_file: Optional[Path] = None,
+                                  reachable: Optional[bool] = None) -> bool:
+    """Whether a task of `run_id` may execute on this host.
+
+    The single rule the workflow turns on: work executes on a compute node, or
+    on a machine with no scheduler to submit to, and never on a submit host
+    unless the operator asked for that one run by flag. The acknowledgement is
+    compared against the run id rather than merely being present, so it cannot
+    carry over to the next run.
+    """
+    resolved = role or host_role(environ=environ, scontrol_file=scontrol_file, reachable=reachable)
+    if resolved != HOST_ROLE_SUBMIT:
+        return True
+    ack = login_execution_ack(environ)
+    return bool(ack) and bool(run_id) and ack == str(run_id)
+
+
+def effective_backend(scheduler: Dict[str, Any], run_id: str = "", role: Optional[str] = None,
+                      environ: Optional[Dict[str, str]] = None,
+                      scontrol_file: Optional[Path] = None,
+                      reachable: Optional[bool] = None) -> Tuple[str, str]:
+    """The backend a submission will really use, and why it differs from the config.
+
+    A project configured `local` on a submit host is promoted to Slurm rather
+    than executed on the login node: the configuration states an intent the host
+    cannot honour, and what the run records has to be what actually ran. The
+    second element is "declared" when the configuration was honoured and
+    "promoted-from-local" when it was not.
+    """
+    declared = str(scheduler.get("backend") or "local").strip().lower()
+    if declared == "local" and not submit_host_execution_allowed(
+            run_id, role=role, environ=environ, scontrol_file=scontrol_file, reachable=reachable):
+        return "slurm", "promoted-from-local"
+    return declared, "declared"
+
+
+def login_host_refusal(action: str, environ: Optional[Dict[str, str]] = None) -> str:
+    """The one refusal message every enforcement point raises."""
+    declared = " (role declared through %s)" % HOST_ROLE_VARIABLE if host_role_source(environ) == "declared" else ""
+    return ("refusing to %s: this host (%s) is a Slurm submit host%s, so the work would run on the "
+            "login node. Every task must run on a compute node: set scheduler.backend to slurm and "
+            "submit through tools/submit_workflow.py, or run inside an allocation (salloc, or "
+            "srun --pty bash). Nothing was executed."
+            % (action, socket.gethostname(), declared))
+
 
 
 # --- root Report.md run log --------------------------------------------------

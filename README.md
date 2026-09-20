@@ -262,7 +262,11 @@ Scanpy、MethSCAn、ALLCools 和 MethylVI 均有内置执行适配器，并自�
 
 每个 Slurm 任务在执行 `sbatch` 前都会重新读取 `sinfo`、`scontrol show nodes`、全局 `squeue` 和当前用户 `squeue`。资源报告分别保存 Slurm 可调度 CPU/内存和操作系统观测到的 `CPULoad`/`FreeMem`。
 
-当资源低于正确性所需 floor、分区不存在或 Slurm 查询失败时，不会强行提交。默认按 partition 调度，不固定节点。local 后端使用同一个 DAG，但受到 `max_threads`、`max_memory` 和并发设置限制。
+当资源低于正确性所需 floor、分区不存在或 Slurm 查询失败时，不会强行提交。默认按 partition 调度，不固定节点。
+
+**长任务绝不在登录节点执行。** 每个决策点都用同一套主机角色判定：在 Slurm 分配内（`SLURM_JOB_ID` 存在）为 `compute`，本机执行即计算节点；无分配但 `scontrol ping` 有控制器应答为 `submit`（登录节点）；两者皆无为 `standalone`（单机，没有可提交的对象）。在提交节点上，写成 `backend: local` 的项目会被改为 Slurm 提交，而不是就地执行，`submissions.json` 用 `backend_declared` 与 `backend_effective` 记录这次升级，每份 `task_status.json` 记录执行时的角色与 `slurm_job_id`。`run_task.py`、`task_adapter.py` 与 `Methylvi/*/run.sh` 在执行前拒绝，且拒绝属于前置条件失败：退出码 2，不写任何任务证据。登录节点只负责校验、计划、提交、检查与报告，包括资源检查所需的 `sinfo`/`squeue` 查询。若确实需要在当前机器上跑，用 `salloc` 或 `srun --pty bash` 进入分配，而不是加豁免。
+
+单机模式（`standalone`）下 `local` 后端仍可用：使用同一个 DAG，资源为档位目标值按 `scheduler.local.max_threads`、`max_memory` 收紧后的结果，并受并发设置限制。
 
 所有正式结果写入 `PROJECT/Results/runs/<run_id>/`。同一 run 中断后可再次执行 submit：已完成或仍在调度器中的任务不会重复提交，失败或产物缺失的任务会按依赖恢复。
 
@@ -328,7 +332,7 @@ PYTHON_EXE=/path/to/python-3.9-or-newer bash tests/run_tests.sh
   "$HOME/single-cell-multiomics-analysis"
 ```
 
-仓库测试覆盖 RNA-only、ALLC-only、配对多组学、环境 bootstrap、输入数据链接与下载校验、内置参考默认值、完成证据、路线闭包、常见 ALLC 命名、错误 checksum、Slurm 资源和 local backend。
+仓库测试覆盖 RNA-only、ALLC-only、配对多组学、环境 bootstrap、输入数据链接与下载校验、内置参考默认值、完成证据、路线闭包、常见 ALLC 命名、错误 checksum、Slurm 资源选择、主机角色判定与登录节点拒绝、以及 `local` 单机后端。
 
 ### 11. 进一步文档
 
@@ -427,11 +431,15 @@ The bootstrapper reuses compatible environments read-only and creates missing pr
 
 Review the preflight report, DAG, and resource plans. Built-in adapters cover Scanpy, MethSCAn, ALLCools, and MethylVI and select the declared stage environment. Explicit route subsets validate only the input modalities, references, and environments used by their closed DAG. `analysis.task_commands` is an expert override, not a required setup step. A successful override must create `<task_dir>/task_outputs.json` with a non-empty `artifacts` array of existing absolute paths; child-process and wrapper-task return codes are recorded separately.
 
-To execute an approved run, repeat `submit_workflow.py` without `--dry-run`. Production submission requires matching full-validation evidence and creates it when absent. Each Slurm task receives a fresh resource query immediately before submission. Local execution uses the same DAG under configured limits. Results are isolated under `Results/runs/<run_id>/`, and re-submission resumes incomplete work.
+To execute an approved run, repeat `submit_workflow.py` without `--dry-run`. Production submission requires matching full-validation evidence and creates it when absent. Each Slurm task receives a fresh resource query immediately before submission. Results are isolated under `Results/runs/<run_id>/`, and re-submission resumes incomplete work.
+
+**Long-running tasks never execute on a login node.** Every decision point resolves the same host role: `compute` inside a Slurm allocation (`SLURM_JOB_ID` is set), where the local executor is itself a compute node; `submit` when no allocation exists but `scontrol ping` reports a controller UP; `standalone` when neither holds, and there is nothing to submit to. On a submit host a project configured `backend: local` is submitted to Slurm rather than executed in place, `submissions.json` records that as `backend_declared` beside `backend_effective`, and each `task_status.json` records the role and `slurm_job_id` the task saw. `run_task.py`, `task_adapter.py`, and `Methylvi/*/run.sh` refuse before executing, and a refusal is a precondition failure: exit 2, no task evidence written. The login node validates, plans, submits, inspects, and reports — including the `sinfo`/`squeue` queries the resource check performs. To run work on the machine you are on, enter an allocation with `salloc` or `srun --pty bash` rather than granting an exemption.
+
+On a standalone machine the `local` backend remains available: the same DAG, with resources clamped to `scheduler.local.max_threads`/`max_memory` and floored against the profile.
 
 `assets/project-template/config/examples/` carries a completed intake (`example-ipf-tissue.yaml`, runnable directly with `init_project.py --intake`), the same rows as a generated manifest, and a README recording one study's observed magnitudes and the values that must be re-derived rather than copied. Generated projects never read it. Its scheduler block is deliberately empty: partitions, accounts, and node lists describe your cluster, not someone else's.
 
-The template also ships standalone `run_*.sbatch` and `submit_*.sh` wrappers that run one stage without a plan, for exploring a stage, smoke testing a change, or recovering a single stage of a completed run. They resolve resources from the same named scheduler profiles the DAG uses and carry no site directive, but they produce no `task_outputs.json` and are never a run's completion evidence. The MethylVI route runners additionally require an explicit `SCMO_STANDALONE_ACK=1`, which those wrappers set; a direct `run.sh` call is never granted it implicitly.
+The template also ships standalone `run_*.sbatch` and `submit_*.sh` wrappers that run one stage without a plan, for exploring a stage, smoke testing a change, or recovering a single stage of a completed run. They resolve resources from the same named scheduler profiles the DAG uses and carry no site directive, but they produce no `task_outputs.json` and are never a run's completion evidence. The MethylVI route runners additionally require an explicit `SCMO_STANDALONE_ACK=1`, which those wrappers set; a direct `run.sh` call is never granted it implicitly. That acknowledgement is about provenance, not about host: it does not make a login node a legal place to run, and the runners refuse one. The `.sbatch` wrappers are sbatch entry points — submit them rather than bashing them by hand outside an allocation.
 
 ### Further documentation
 

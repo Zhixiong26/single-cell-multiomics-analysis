@@ -19,7 +19,8 @@ from typing import Any, Dict
 # NameError the moment such a helper referenced it.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from _common import (  # noqa: E402  (must follow the sys.path insert above)
-    WorkflowError, load_environments, load_project, project_files, resolve_path, write_json,
+    WorkflowError, load_environments, load_project, login_host_refusal, project_files, resolve_path,
+    submit_host_execution_allowed, write_json,
 )
 
 
@@ -74,6 +75,11 @@ def main() -> int:
     parser.add_argument("--task", required=True)
     parser.add_argument("--task-dir", type=Path, required=True)
     args = parser.parse_args()
+    # A second entry point, not a copy of run_task.py's guard: the MethSCAn sbatch
+    # wrappers call this adapter from inside an allocation, while a hand call on a
+    # login node would run the whole stage with no resource check at all.
+    if not submit_host_execution_allowed(args.run_id):
+        raise WorkflowError(login_host_refusal("execute task %s of run %s" % (args.task, args.run_id)))
     root = args.project.resolve()
 
     cfg = load_project(root)
